@@ -4,6 +4,24 @@ AuthFunction .NET 10 autentica por documento e código de uso único, com desafi
 
 ## Estrutura e arquitetura
 
+~~~mermaid
+flowchart LR
+    GW["Gateway"] -->|versao numerica| AUTH
+    API["API da oficina"] -->|IAM / alias live| EMAIL
+    subgraph FUNCTIONS["Repositorio Serverless: duas stacks SAM"]
+        AUTH["AuthFunction: request-code / verify-code"]
+        EMAIL["EmailFunction: MIME e SMTP"]
+        EXT["Extensao Collector"]
+        AUTH -->|IAM / alias live| EMAIL
+        AUTH -->|OTLP em loopback| EXT
+    end
+    CONFIG["SSM e Secrets Manager"] -.->|inicializacao| AUTH
+    AUTH -->|cadastro, desafios e limites / TLS| DB[("RDS PostgreSQL")]
+    EMAIL -->|NLB interno / TCP 2525| SMTP["SMTP4dev privado no EKS"]
+    EXT -->|OTLP HTTPS| NR["New Relic"]
+    EMAIL -->|JSON tecnico| LOG["CloudWatch Logs"]
+~~~
+
 | Projeto | Responsabilidade |
 |---|---|
 | Domain | Identidade, status e elegibilidade; sem AWS/banco |
@@ -29,9 +47,9 @@ JSON UTF-8 estrito de até 4 KiB, inclusive base64, sem extras/duplicações/nul
 
 Cliente ausente/Inactive/sem e-mail utilizável recebe 202 sem escrita/limpeza/envio. Cliente elegível persiste Pending antes do Invoke e só vira Ready após captura confirmada. Falha invalida quando possível sem mascarar a original; Pending nunca autentica. Cooldown de 60 s, cinco pedidos/hora, validade de cinco minutos e cinco tentativas; consumo atômico, sem transação aberta durante envio.
 
-JWT HS256 mantém UUID/nome cadastrado, role Customer e dez minutos, sem documento, e-mail, código, challengeId ou OS. Assinatura/consumo só retornam token após commit; sem refresh/replay/garantia de entrega única. A API aplica titularidade e regras de OS; Active/ClockSkew zero e decisão explícita foram implementados na AE.7 e conferidos em hom na AE.10.
+JWT HS256 mantém UUID/nome cadastrado, role Customer e dez minutos, sem documento, e-mail, código, challengeId ou OS. Assinatura/consumo só retornam token após commit; sem refresh/replay/garantia de entrega única. A API aplica titularidade, cadastro Active e regras da OS, com ClockSkew zero e decisão explícita.
 
-A rota antiga/desconhecida retorna 404 no handler; método incorreto retorna 405/Allow: POST. Gateway com OpenAPI auth 2.0.0 e as duas rotas foi implantado coordenadamente e conferido na AE.10, sem Authorizer ou endpoint público de envio. Em nova implantação, preservar essa coordenação e a versão numérica auth consumida pelo Gateway.
+A rota antiga/desconhecida retorna 404 no handler; método incorreto retorna 405/Allow: POST. O Gateway usa OpenAPI auth 2.0.0 e as duas rotas, sem Authorizer ou endpoint público de envio. Em nova implantação, preservar essa coordenação e a versão numérica auth consumida pelo Gateway.
 
 ## Consumo do Auth.Contracts
 
@@ -70,7 +88,7 @@ Runtime__Environment=hom|prd e AWS_REGION=us-east-1 são obrigatórios ao inicia
 
 SSM String/WithDecryption=false fornece nove campos de banco/JWT e um segundo lote com alias/contrato email/v1. Banco/JWT: jwt-secret-arn/issuer/audience em base/v2 e endpoint/port/database-name/auth-secret-arn/auth-db-user/ssl-mode em database/v2. AWSCURRENT fornece JWT e credencial mecanica_auth; não usa Secret administrativo/database-api. Os valores ficam em memória e a inicialização bem-sucedida é reutilizada por handler. Falha não é armazenada como sucesso e permite nova tentativa; mudanças de Secret exigem nova inicialização.
 
-Leitura AWS tem prazo de oito segundos e retries Standard existentes. Handler reserva um segundo do RemainingTime para resposta. Conexão/comando têm cinco segundos cada, sujeitos ao prazo total. NpgsqlDataSource é fábrica reutilizável, Pooling=false/TLS VerifyFull/GssEncryptionMode=Disable; cada lookup abre e descarta conexão inclusive em erro/cancelamento. CA pública está em [Infrastructure/Certificates/rds-ca.pem](Infrastructure/Certificates/rds-ca.pem).
+Leitura AWS tem prazo de oito segundos e retries Standard existentes. Handler reserva um segundo do RemainingTime para resposta. Conexão/comando têm cinco segundos cada, sujeitos ao prazo total. NpgsqlDataSource é fábrica reutilizável, Pooling=false/TLS VerifyFull/GssEncryptionMode=Disable; cada chamada ao store/lookup abre e descarta sua conexão, compartilhada pelos comandos da operação, inclusive em erro/cancelamento. CA pública está em [Infrastructure/Certificates/rds-ca.pem](Infrastructure/Certificates/rds-ca.pem).
 
 SQL fixo parametrizado consulta id/name/document/status/email de customers e opera somente os desafios/limites do cliente elegível; não consulta orders. Consulta sem resultado/Inactive não é falha de banco. Dados corrompidos/status desconhecido/duplicatas são técnicos. Handler implementa descarte explícito para testes/local; a AWS não garante callback de descarte ao encerrar o ambiente de execução.
 
@@ -103,7 +121,7 @@ No SAM CLI 1.167.0, CodeUri objeto preserva ZIP no sam delete; stack/templates o
 
 [Contratos SSM](https://github.com/pknfelps/GerenciamentoMecanicaSistema/blob/develop/docs/arquitetura/CONTRATOS_ENTRE_REPOSITORIOS.md) · [GitHub Actions](https://github.com/pknfelps/GerenciamentoMecanicaServerless/actions).
 
-O endpoint de negócio, quando provisionado, vem de /mecanica/ambiente/gateway/v2/endpoint, não de Function URL própria. Swagger/Postman pertencem à API e o contrato estático está neste repositório. Exemplos não garantem disponibilidade contínua; consultar o catálogo/execução do ambiente. PR/publish/provision futuros ficam com o mantenedor.
+O endpoint de negócio, quando provisionado, vem de /mecanica/ambiente/gateway/v2/endpoint, não de Function URL própria. [Swagger/Postman](https://github.com/pknfelps/GerenciamentoMecanicaSistema/blob/develop/postman/README.md) pertencem à API e o contrato estático está neste repositório. Exemplos não garantem disponibilidade contínua; consultar o catálogo/execução do ambiente.
 
 ## EmailFunction local
 
