@@ -1,0 +1,68 @@
+name: serverless-deploy
+run-name: serverless-deploy / ${{ github.ref_name == 'develop' && 'hom' || 'prd' }} / ${{ github.sha }}
+
+on:
+  push:
+    branches: [develop, main]
+
+permissions: {}
+concurrency:
+  group: serverless-deploy-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+  cancel-in-progress: false
+
+jobs:
+  publish-email:
+    uses: ./.github/workflows/reusable-publish.yml
+    concurrency:
+      group: email-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      component: email
+      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+
+  provision-email:
+    needs: publish-email
+    uses: ./.github/workflows/reusable-provision.yml
+    concurrency:
+      group: email-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      component: email
+      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      artifact_commit: ${{ github.sha }}
+
+  publish-auth:
+    uses: ./.github/workflows/reusable-publish.yml
+    concurrency:
+      group: auth-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      component: auth
+      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+
+  provision-auth:
+    needs: [publish-auth, provision-email]
+    uses: ./.github/workflows/reusable-provision.yml
+    concurrency:
+      group: auth-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      component: auth
+      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      artifact_commit: ${{ github.sha }}
