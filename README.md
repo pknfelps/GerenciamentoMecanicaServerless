@@ -106,10 +106,13 @@ Mecanica.Auth mede solicitações de código e confirmações/duração por resu
 
 | Auth | Email | Fluxo compartilhado |
 |---|---|---|
+| [serverless-deploy](.github/workflows/serverless-deploy.yml) | Email e auth | Push/merge develop/hom ou main/prd: publica os dois componentes; implanta email antes de auth, usando o mesmo SHA |
 | [auth-ci](.github/workflows/auth-ci.yml) | [email-ci](.github/workflows/email-ci.yml) | PR/manual: solução completa, ambos SAMs, actionlint |
 | [auth-publish](.github/workflows/auth-publish.yml) | [email-publish](.github/workflows/email-publish.yml) | Manual: testes/build SAM → ZIP/template/checksum imutável; OpenAPI somente auth |
 | [auth-provision](.github/workflows/auth-provision.yml) | [email-provision](.github/workflows/email-provision.yml) | Manual: environment/artifact_commit, rede/dependências/VersionId → deploy SAM |
 | [auth-destroy](.github/workflows/auth-destroy.yml) | [email-destroy](.github/workflows/email-destroy.yml) | Manual: consumidores ausentes → sam delete → ENIs/egress ausentes |
+
+No fluxo automático, as publicações reutilizam os mesmos testes, builds e artefatos imutáveis dos fluxos manuais; provision-auth aguarda publish-auth e provision-email. Base/SMTP4dev e banco/Job devem estar disponíveis antes do push. A API deve ser publicada após a conclusão de email. Atualizar Gateway depois de concluir API/auth. Não há disparo de outros repositórios nem aprovação intermediária de SAM.
 
 Wrappers fixam componente; quatro reusable-*.yml concentram etapas comuns com allowlists. Develop/hom e main/prd, OIDC e filas por componente/ambiente; sem aprovação adicional. Required checks configuration/dotnet preservados como gates finais do auth-ci, abrangendo também EmailFunction e seu SAM. Role CI somente leitura do pacote; Environment AWS_ROLE_ARN para auth e **AWS_EMAIL_ROLE_ARN** para email. Ver [Workflows Serverless](.github/workflows).
 
