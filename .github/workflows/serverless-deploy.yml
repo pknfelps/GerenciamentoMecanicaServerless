@@ -2,8 +2,7 @@ name: serverless-deploy
 run-name: serverless-deploy / ${{ github.ref_name == 'develop' && 'hom' || 'prd' }} / ${{ github.sha }}
 
 on:
-  push:
-    branches: [develop, main]
+  workflow_dispatch:
 
 permissions: {}
 concurrency:
