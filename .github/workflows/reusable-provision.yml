@@ -206,7 +206,7 @@ jobs:
             echo 'Nome, versao e ARN de invocacao:'
             jq -r '.[] | select(.OutputKey == "FunctionName" or .OutputKey == "FunctionVersion" or .OutputKey == "InvocationArn") | "- \(.OutputKey): \(.OutputValue)"' artifacts/deploy/outputs.json
             if [ "$COMPONENT" = auth ]; then
-              echo 'OpenTelemetry/New Relic e X-Ray ativos; ingestao nao comprovada pelo workflow. Atualize o Gateway para esta versao numerica e contrato 2.0.0.'
+              echo 'OpenTelemetry/New Relic e X-Ray ativos; ingestao nao comprovada pelo workflow. Atualize o Gateway para esta versao numerica e contrato 2.1.0.'
             else
               echo 'Alias live/contrato v1 publicados; captura SMTP privada, sem entrega externa ou endpoint HTTP.'
             fi
