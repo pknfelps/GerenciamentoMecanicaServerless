@@ -63,14 +63,16 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         var category = "invalid-request";
 
         var route = AuthenticationRoute.Resolve(request);
+        var traceId = Activity.Current?.Id ?? request.RequestContext?.RequestId ?? context.AwsRequestId ?? string.Empty;
         if (route == AuthenticationRoute.Unknown)
             response = AuthenticationResponse.NotFound();
+        else if (route == AuthenticationRoute.InternalUsers)
+            (response, category) = await ExecuteWithDeadlineAsync(token => ExecuteInternalUsersAsync(request, traceId, token), route, context);
         else if (request.HttpMethod != "POST")
             response = AuthenticationResponse.MethodNotAllowed(route);
         else if (route == AuthenticationRoute.InternalLogin)
         {
-            var traceId = Activity.Current?.Id ?? request.RequestContext?.RequestId ?? context.AwsRequestId ?? string.Empty;
-            var invalid = InternalLoginRequestParser.Parse(request, traceId, out var loginInput);
+            var invalid = InternalUserRequestParser.ParseCredentials(request, traceId, out var loginInput);
             if (invalid is not null)
                 response = invalid;
             else
@@ -121,8 +123,8 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         catch (Exception error)
         {
             observability?.RecordException(error);
-            var response = route == AuthenticationRoute.InternalLogin
-                ? InternalLoginResponse.TechnicalFailure()
+            var response = route is AuthenticationRoute.InternalLogin or AuthenticationRoute.InternalUsers
+                ? InternalAuthResponse.TechnicalFailure(route)
                 : AuthenticationResponse.TechnicalFailure(route);
             var category = error is OperationCanceledException or TimeoutException || cancellation.IsCancellationRequested
                 ? "timeout" : "technical-failure";
@@ -130,11 +132,18 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         }
     }
 
+    private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteInternalUsersAsync(
+        APIGatewayProxyRequest request, string traceId, CancellationToken cancellationToken)
+    {
+        var response = await InternalUsersEndpoint.ExecuteAsync(request, traceId, runtime, cancellationToken);
+        return (response, "user-management");
+    }
+
     private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteInternalLoginAsync(
         APIGatewayProxyRequest request, InternalLoginInput input, CancellationToken cancellationToken)
     {
         var token = await internalLogin(input.Name!, input.Password!, input.Role!, cancellationToken);
-        var response = InternalLoginResponse.FromToken(request, token);
+        var response = InternalAuthResponse.FromToken(request, token);
         return (response, response.StatusCode == 200 ? "authenticated" : "invalid-credentials");
     }
 

@@ -1,14 +1,23 @@
 using System.Security.Cryptography;
+using System.Globalization;
 using GerenciamentoMecanica.Autenticacao.Application.Authentication;
 
 namespace GerenciamentoMecanica.Autenticacao.Infrastructure.Authentication;
 
-public sealed class Pbkdf2PasswordVerifier : IInternalPasswordVerifier
+public sealed class Pbkdf2PasswordHasher : IInternalPasswordHasher
 {
     private const string Algorithm = "pbkdf2-sha256";
     private const int Iterations = 100_000;
     private const int SaltSize = 16;
     private const int HashSize = 32;
+
+    public string Hash(string password)
+    {
+        var salt = RandomNumberGenerator.GetBytes(SaltSize);
+        var hash = Rfc2898DeriveBytes.Pbkdf2(password, salt, Iterations, HashAlgorithmName.SHA256, HashSize);
+        return string.Join('$', Algorithm, Iterations.ToString(CultureInfo.InvariantCulture),
+            Convert.ToBase64String(salt), Convert.ToBase64String(hash));
+    }
 
     public bool Verify(string password, string? passwordHash)
     {

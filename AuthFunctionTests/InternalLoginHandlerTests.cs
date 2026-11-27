@@ -159,7 +159,7 @@ public class InternalLoginHandlerTests
     private FunctionHandler Handler()
     {
         var jwt = new JwtIssuer(Key, Issuer, Audience);
-        var useCase = new InternalLoginUseCase(store, new Pbkdf2PasswordVerifier(), (name, role, id) => jwt.Generate(name, role, id));
+        var useCase = new InternalLoginUseCase(store, new Pbkdf2PasswordHasher(), (name, role, id) => jwt.Generate(name, role, id));
         return new FunctionHandler(
             (_, _) => throw new AssertionException("Customer code must not be requested."),
             (_, _, _, _) => throw new AssertionException("Customer code must not be verified."),

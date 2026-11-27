@@ -38,11 +38,11 @@ public static class AuthenticationResponse
     }
     private static APIGatewayProxyResponse Problem(int status, string title, string detail, string route) =>
         Create(status, "application/problem+json", JsonSerializer.Serialize(new AuthenticationProblem(status, title, detail, route), JsonOptions));
-    internal static APIGatewayProxyResponse Create(int status, string contentType, string body) => new()
+    internal static APIGatewayProxyResponse Create(int status, string? contentType, string body)
     {
-        StatusCode = status,
-        Body = body,
-        IsBase64Encoded = false,
-        Headers = new Dictionary<string, string> { ["Content-Type"] = contentType, ["Cache-Control"] = "no-store" }
-    };
+        var headers = new Dictionary<string, string> { ["Cache-Control"] = "no-store" };
+        if (contentType is not null)
+            headers["Content-Type"] = contentType;
+        return new APIGatewayProxyResponse { StatusCode = status, Body = body, Headers = headers, IsBase64Encoded = false };
+    }
 }

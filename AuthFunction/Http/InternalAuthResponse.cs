@@ -1,10 +1,11 @@
 using Amazon.Lambda.APIGatewayEvents;
+using GerenciamentoMecanica.Autenticacao.Domain.Users;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace GerenciamentoMecanica.Autenticacao.Function.Http;
 
-internal static class InternalLoginResponse
+internal static class InternalAuthResponse
 {
     private const string PlainText = "text/plain";
     private const string Json = "application/json";
@@ -39,14 +40,32 @@ internal static class InternalLoginResponse
             traceId
         }, JsonOptions));
 
-    public static APIGatewayProxyResponse TechnicalFailure() =>
-        AuthenticationResponse.Create(500, "application/json; charset=utf-8", JsonSerializer.Serialize(new
+    public static APIGatewayProxyResponse TechnicalFailure(string route) =>
+        OperationFailure(route, 500, "Erro interno do servidor", "Ocorreu um erro inesperado ao processar a requisição.");
+
+    public static APIGatewayProxyResponse OperationFailure(string route, int status, string title, string detail) =>
+        AuthenticationResponse.Create(status, "application/json; charset=utf-8", JsonSerializer.Serialize(new
         {
-            title = "Erro interno do servidor",
-            status = 500,
-            detail = "Ocorreu um erro inesperado ao processar a requisição.",
-            instance = AuthenticationRoute.InternalLogin
+            title,
+            status,
+            detail,
+            instance = route
         }, JsonOptions));
+
+    public static APIGatewayProxyResponse UserNotFound(string traceId) =>
+        AuthenticationResponse.Create(404, Problem, JsonSerializer.Serialize(new
+        {
+            type = "https://tools.ietf.org/html/rfc9110#section-15.5.5",
+            title = "Not Found",
+            status = 404,
+            traceId
+        }, JsonOptions));
+
+    public static APIGatewayProxyResponse User(APIGatewayProxyRequest request, InternalUser user)
+    {
+        var mediaType = StringMediaType(request) == "text/json" ? "text/json" : Json;
+        return AuthenticationResponse.Create(200, mediaType + "; charset=utf-8", JsonSerializer.Serialize(user, JsonOptions));
+    }
 
     private static string StringMediaType(APIGatewayProxyRequest request)
     {

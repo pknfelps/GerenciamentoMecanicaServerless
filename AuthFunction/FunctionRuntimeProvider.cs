@@ -32,7 +32,7 @@ public sealed class FunctionRuntimeProvider : IDisposable, IAsyncDisposable
         return await context.InternalLogin.ExecuteAsync(name, password, role, cancellationToken);
     }
 
-    private async Task<FunctionRuntime> GetRuntimeAsync(CancellationToken cancellationToken)
+    internal async Task<FunctionRuntime> GetRuntimeAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 
