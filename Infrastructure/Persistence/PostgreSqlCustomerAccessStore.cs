@@ -15,7 +15,7 @@ public sealed class PostgreSqlCustomerAccessStore(
     IntegrationMetrics? metrics = null, Func<string>? generateCode = null) : ICustomerAccessStore
 {
     private const int CleanupBatchSize = 100;
-    private const string CustomerColumns = "id, name, document, status, email";
+    private const string CustomerColumns = "customer_id AS Id, name, document, status, email";
     private const string ChallengeColumns = """
         id, customer_id AS CustomerId, code_salt AS Salt, code_verifier AS Verifier,
         created_at AS CreatedAt, expires_at AS ExpiresAt, state, failed_attempts AS FailedAttempts,
@@ -28,7 +28,7 @@ public sealed class PostgreSqlCustomerAccessStore(
         ArgumentException.ThrowIfNullOrWhiteSpace(canonicalDocument);
         await using var connection = await OpenAsync(cancellationToken);
         var customer = await ReadAsync<CustomerRow>(connection, null,
-            $"SELECT {CustomerColumns} FROM public.customers WHERE document = @Document",
+            $"SELECT {CustomerColumns} FROM public.customer_access WHERE document = @Document AND status <> 'Revoked'",
             new { Document = canonicalDocument }, cancellationToken);
 
         // No transaction, code generation, cleanup or write for an unknown customer.
@@ -286,7 +286,8 @@ public sealed class PostgreSqlCustomerAccessStore(
 
     private Task<CustomerRow?> FindCustomerAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         Guid id, CancellationToken cancellationToken) => ReadAsync<CustomerRow>(connection, transaction,
-        $"SELECT {CustomerColumns} FROM public.customers WHERE id = @Id", new { Id = id }, cancellationToken);
+        $"SELECT {CustomerColumns} FROM public.customer_access WHERE customer_id = @Id AND status <> 'Revoked'",
+        new { Id = id }, cancellationToken);
 
     private async Task<CustomerAccessChallenge?> FindChallengeAsync(NpgsqlConnection connection, NpgsqlTransaction transaction,
         Guid customerId, Guid id, CancellationToken cancellationToken)

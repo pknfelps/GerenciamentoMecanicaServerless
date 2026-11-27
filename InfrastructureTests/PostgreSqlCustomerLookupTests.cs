@@ -27,7 +27,7 @@ public class PostgreSqlCustomerLookupTests
     private static readonly Guid CnpjId = Guid.Parse("66666666-7777-8888-9999-aaaaaaaaaaaa");
 
     private readonly PostgreSqlContainer container = new PostgreSqlBuilder("postgres:16.15")
-        .WithDatabase("mecanica").WithUsername("postgres").WithPassword("test-only-admin-password").Build();
+        .WithDatabase("mecanica_identity").WithUsername("postgres").WithPassword("test-only-admin-password").Build();
 
     private NpgsqlDataSource admin = null!;
     private NpgsqlDataSource authentication = null!;
@@ -52,7 +52,10 @@ public class PostgreSqlCustomerLookupTests
     [Test]
     public async Task InvalidPersistedCustomerDoesNotTurnTheQueryIntoADatabaseFailure()
     {
-        await ExecuteAdminAsync("UPDATE customers SET status = 'Unknown' WHERE id = @CpfId", new { CpfId });
+        await ExecuteAdminAsync("""
+            ALTER TABLE public.customer_access DROP CONSTRAINT customer_access_record_check;
+            UPDATE public.customer_access SET status = 'Unknown' WHERE customer_id = @CpfId;
+            """, new { CpfId });
         using var listener = new IntegrationMetricListener();
         using var metrics = new IntegrationMetrics();
         var instrumented = new PostgreSqlCustomerLookup(authentication, metrics);
@@ -79,7 +82,7 @@ public class PostgreSqlCustomerLookupTests
         await ExecuteAdminAsync("""
                                 CREATE ROLE mecanica_auth LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE
                                     NOREPLICATION NOBYPASSRLS PASSWORD 'test-only-auth-password';
-                                GRANT CONNECT ON DATABASE mecanica TO mecanica_auth;
+                                GRANT CONNECT ON DATABASE mecanica_identity TO mecanica_auth;
                                 REVOKE ALL ON SCHEMA public FROM PUBLIC;
                                 GRANT USAGE ON SCHEMA public TO mecanica_auth;
                                 """);
@@ -101,21 +104,27 @@ public class PostgreSqlCustomerLookupTests
     public async Task SeedIsolatedFixture()
     {
         await ExecuteAdminAsync("""
-                                DROP TABLE IF EXISTS public.customers;
-                                CREATE TABLE public.customers (
-                                    id uuid PRIMARY KEY,
-                                    name varchar(100) NOT NULL,
-                                    document varchar(100) NOT NULL UNIQUE,
-                                    status varchar(8) NOT NULL DEFAULT 'Active',
-                                    phone varchar(100) NOT NULL,
-                                    email varchar(100) NOT NULL);
-                                GRANT SELECT (id, name, document, status) ON public.customers TO mecanica_auth;
+                                DROP TABLE IF EXISTS public.customer_access;
+                                CREATE TABLE public.customer_access (
+                                    customer_id uuid PRIMARY KEY,
+                                    name varchar(100),
+                                    document varchar(100) UNIQUE,
+                                    email varchar(100),
+                                    status varchar(8) NOT NULL,
+                                    revision bigint NOT NULL CHECK (revision >= 0),
+                                    CONSTRAINT customer_access_record_check CHECK (
+                                        (status = 'Revoked' AND name IS NULL AND document IS NULL AND email IS NULL)
+                                        OR
+                                        (status IN ('Active', 'Inactive') AND name IS NOT NULL AND document IS NOT NULL AND email IS NOT NULL)
+                                    )
+                                );
+                                GRANT SELECT (customer_id, name, document, status) ON public.customer_access TO mecanica_auth;
                                 """);
 
         await ExecuteAdminAsync("""
-                                INSERT INTO public.customers (id, name, document, phone, email)
-                                VALUES (@CpfId, 'Cliente CPF', @Cpf, 'test-phone', 'cpf@example.invalid'),
-                                       (@CnpjId, 'Cliente CNPJ', @Cnpj, 'test-phone', 'cnpj@example.invalid');
+                                INSERT INTO public.customer_access (customer_id, name, document, email, status, revision)
+                                VALUES (@CpfId, 'Cliente CPF', @Cpf, 'cpf@example.invalid', 'Active', 0),
+                                       (@CnpjId, 'Cliente CNPJ', @Cnpj, 'cnpj@example.invalid', 'Active', 0);
                                 """, new { CpfId, Cpf, CnpjId, Cnpj });
     }
 
@@ -199,7 +208,7 @@ public class PostgreSqlCustomerLookupTests
     [Test]
     public async Task InactiveCustomerIsMappedWithoutBeingFilteredOut()
     {
-        await ExecuteAdminAsync("UPDATE public.customers SET status = 'Inactive' WHERE document = @Document",
+        await ExecuteAdminAsync("UPDATE public.customer_access SET status = 'Inactive' WHERE document = @Document",
             new { Document = Cpf });
 
         var customer = await lookup.FindByDocumentAsync(Cpf, CancellationToken.None);
@@ -215,8 +224,10 @@ public class PostgreSqlCustomerLookupTests
     [TestCase("")]
     public async Task UnknownStatusIsTechnicalAndConnectionCloses(string status)
     {
-        await ExecuteAdminAsync("UPDATE public.customers SET status = @Status WHERE document = @Document",
-            new { Status = status, Document = Cpf });
+        await ExecuteAdminAsync("""
+            ALTER TABLE public.customer_access DROP CONSTRAINT customer_access_record_check;
+            UPDATE public.customer_access SET status = @Status WHERE document = @Document;
+            """, new { Status = status, Document = Cpf });
 
         Assert.ThrowsAsync<InvalidDataException>(() => lookup.FindByDocumentAsync(Cpf, CancellationToken.None));
 
@@ -228,8 +239,8 @@ public class PostgreSqlCustomerLookupTests
     public async Task InvalidStoredIdentityIsTechnicalAndConnectionCloses(bool emptyId)
     {
         await ExecuteAdminAsync(emptyId
-                ? "UPDATE public.customers SET id = @Id WHERE document = @Document"
-                : "UPDATE public.customers SET name = ' ' WHERE document = @Document",
+                ? "UPDATE public.customer_access SET customer_id = @Id WHERE document = @Document"
+                : "UPDATE public.customer_access SET name = ' ' WHERE document = @Document",
             new { Id = Guid.Empty, Document = Cpf });
 
         Assert.ThrowsAsync<InvalidDataException>(() => lookup.FindByDocumentAsync(Cpf, CancellationToken.None));
@@ -241,9 +252,9 @@ public class PostgreSqlCustomerLookupTests
     public async Task MultipleMatchesAreTechnicalAndConnectionCloses()
     {
         await ExecuteAdminAsync("""
-                                ALTER TABLE public.customers DROP CONSTRAINT customers_document_key;
-                                INSERT INTO public.customers (id, name, document, phone, email)
-                                VALUES (@Id, 'Duplicado', @Document, 'test-phone', 'duplicate@example.invalid');
+                                ALTER TABLE public.customer_access DROP CONSTRAINT customer_access_document_key;
+                                INSERT INTO public.customer_access (customer_id, name, document, email, status, revision)
+                                VALUES (@Id, 'Duplicado', @Document, 'duplicate@example.invalid', 'Active', 0);
                                 """, new { Id = Guid.NewGuid(), Document = Cpf });
 
         Assert.ThrowsAsync<InvalidOperationException>(() => lookup.FindByDocumentAsync(Cpf, CancellationToken.None));
@@ -254,21 +265,21 @@ public class PostgreSqlCustomerLookupTests
     [Test]
     public async Task SqlFailureIsTechnicalAndConnectionCloses()
     {
-        await ExecuteAdminAsync("ALTER TABLE public.customers DROP COLUMN status");
+        await ExecuteAdminAsync("ALTER TABLE public.customer_access DROP COLUMN status");
 
         Assert.ThrowsAsync<PostgresException>(() => lookup.FindByDocumentAsync(Cpf, CancellationToken.None));
 
         await AssertNoOpenConnectionsAsync();
     }
 
-    [TestCase("SELECT phone FROM public.customers")]
-    [TestCase("SELECT email FROM public.customers")]
-    [TestCase("SELECT * FROM public.customers")]
-    [TestCase("UPDATE public.customers SET name = 'forbidden'")]
-    [TestCase("DELETE FROM public.customers")]
+    [TestCase("SELECT revision FROM public.customer_access")]
+    [TestCase("SELECT email FROM public.customer_access")]
+    [TestCase("SELECT * FROM public.customer_access")]
+    [TestCase("UPDATE public.customer_access SET name = 'forbidden'")]
+    [TestCase("DELETE FROM public.customer_access")]
     [TestCase(
-        "INSERT INTO public.customers (id, name, document, phone, email) VALUES (gen_random_uuid(), 'forbidden', 'forbidden', '', '')")]
-    public async Task AuthRoleCannotReadOtherColumnsOrWrite(string sql)
+        "INSERT INTO public.customer_access (customer_id, name, document, email, status, revision) VALUES (gen_random_uuid(), 'forbidden', 'forbidden', '', 'Active', 0)")]
+    public async Task LookupRoleNeedsOnlyTheGrantedColumnsAndNoWrites(string sql)
     {
         await using (var connection = await authentication.OpenConnectionAsync())
         {
@@ -294,7 +305,7 @@ public class PostgreSqlCustomerLookupTests
         await using var blocker = await admin.OpenConnectionAsync();
         await using var transaction = await blocker.BeginTransactionAsync();
 
-        await blocker.ExecuteAsync("LOCK TABLE public.customers IN ACCESS EXCLUSIVE MODE", transaction: transaction);
+        await blocker.ExecuteAsync("LOCK TABLE public.customer_access IN ACCESS EXCLUSIVE MODE", transaction: transaction);
 
         using var cancellation = new CancellationTokenSource();
         var pending = lookup.FindByDocumentAsync(Cpf, cancellation.Token);
@@ -319,7 +330,7 @@ public class PostgreSqlCustomerLookupTests
         await using var blocker = await admin.OpenConnectionAsync();
         await using var transaction = await blocker.BeginTransactionAsync();
 
-        await blocker.ExecuteAsync("LOCK TABLE public.customers IN ACCESS EXCLUSIVE MODE", transaction: transaction);
+        await blocker.ExecuteAsync("LOCK TABLE public.customer_access IN ACCESS EXCLUSIVE MODE", transaction: transaction);
 
         var elapsed = Stopwatch.StartNew();
         var error = Assert.ThrowsAsync<NpgsqlException>(() => lookup.FindByDocumentAsync(Cpf, CancellationToken.None));
