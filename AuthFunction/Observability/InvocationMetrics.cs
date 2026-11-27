@@ -16,9 +16,13 @@ public sealed class InvocationMetrics
         duration = meter.CreateHistogram<double>("mecanica.auth.invocation.duration", "s");
     }
 
-    public void Record(string outcome, int status, TimeSpan elapsed)
+    public void Record(string route, string method, string outcome, int status, TimeSpan elapsed)
     {
-        var tags = new TagList { { "outcome", outcome }, { "http.response.status_code", status } };
+        var tags = new TagList
+        {
+            { "http.route", route }, { "http.request.method", method },
+            { "outcome", outcome }, { "http.response.status_code", status }
+        };
         invocations.Add(1, tags);
         duration.Record(elapsed.TotalSeconds, tags);
     }

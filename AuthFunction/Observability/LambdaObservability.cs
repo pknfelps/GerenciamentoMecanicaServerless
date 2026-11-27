@@ -168,13 +168,16 @@ public sealed class LambdaObservability : IDisposable
         return response;
     }
 
-    public void Complete(ILambdaContext context, APIGatewayProxyRequest request, int status, string outcome, TimeSpan elapsed)
+    internal static void Complete(LambdaObservability? telemetry, ILambdaContext context, APIGatewayProxyRequest request,
+        string route, int status, string outcome, TimeSpan elapsed)
     {
-        var activity = Activity.Current;
+        var method = request.HttpMethod is "GET" or "POST" or "PATCH" or "DELETE" ? request.HttpMethod : "OTHER";
+        var activity = telemetry is null ? null : Activity.Current;
         activity?.SetTag("http.response.status_code", status);
-        activity?.SetCustomProperty("Mecanica.Auth.Route", Http.AuthenticationRoute.Resolve(request));
+        activity?.SetCustomProperty(SafeTraceProcessor.MethodProperty, method);
+        activity?.SetCustomProperty(SafeTraceProcessor.RouteProperty, route);
         if (status >= 500)
-            activity?.SetStatus(ActivityStatusCode.Error, settings.Collection.InvocationErrorMessage);
+            activity?.SetStatus(ActivityStatusCode.Error, telemetry?.settings.Collection.InvocationErrorMessage);
         else
             activity?.SetStatus(ActivityStatusCode.Unset);
 
@@ -182,20 +185,23 @@ public sealed class LambdaObservability : IDisposable
         {
             ["lambdaRequestId"] = context.AwsRequestId,
             ["gatewayRequestId"] = request.RequestContext?.RequestId,
+            ["http.route"] = route, ["http.request.method"] = method,
             ["status"] = status, ["durationMs"] = (long)elapsed.TotalMilliseconds, ["category"] = outcome,
             ["traceId"] = activity?.TraceId.ToString(), ["spanId"] = activity?.SpanId.ToString()
         };
         var json = JsonSerializer.Serialize(fields);
         context.Logger.LogLine(json);
+        if (telemetry is null)
+            return;
         try
         {
-            invocations?.Record(outcome, status, elapsed);
-            logger.Log(Microsoft.Extensions.Logging.LogLevel.Information, new EventId(1, "InvocationCompleted"),
+            telemetry.invocations?.Record(route, method, outcome, status, elapsed);
+            telemetry.logger.Log(Microsoft.Extensions.Logging.LogLevel.Information, new EventId(1, "InvocationCompleted"),
                 fields, null, static (state, _) => JsonSerializer.Serialize(state));
         }
         catch (Exception error)
         {
-            Diagnostic(context, error.GetType().FullName);
+            telemetry.Diagnostic(context, error.GetType().FullName);
         }
     }
 

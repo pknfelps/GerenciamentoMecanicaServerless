@@ -82,7 +82,8 @@ public class FunctionHandlerTests
         Assert.That(requests, Is.Zero);
         using var json = JsonDocument.Parse(Log());
         Assert.That(json.RootElement.GetProperty("category").GetString(), Is.EqualTo("authenticated"));
-        Assert.That(json.RootElement.EnumerateObject().Count(), Is.EqualTo(5));
+        Assert.That(json.RootElement.GetProperty("http.route").GetString(), Is.EqualTo(AuthenticationRoute.VerifyCode));
+        Assert.That(json.RootElement.GetProperty("http.request.method").GetString(), Is.EqualTo("POST"));
         Assert.That(Log(), Does.Not.Contain("test.jwt").And.Not.Contain("01234567").And.Not.Contain(Document));
     }
     [TestCase("/customers/validate")]

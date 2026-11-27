@@ -5,6 +5,9 @@ namespace GerenciamentoMecanica.Autenticacao.Function.Observability;
 
 public sealed class SafeTraceProcessor(TelemetryCollectionOptions collection) : BaseProcessor<Activity>
 {
+    internal const string RouteProperty = "Mecanica.Auth.Route";
+    internal const string MethodProperty = "Mecanica.Auth.Method";
+
     public override void OnEnd(Activity activity)
     {
         var database = activity.Source.Name == "Npgsql";
@@ -25,11 +28,14 @@ public sealed class SafeTraceProcessor(TelemetryCollectionOptions collection) : 
             item = new ActivityEvent("exception", item.Timestamp, tags);
         }
 
-        var route = activity.GetCustomProperty("Mecanica.Auth.Route") as string ?? Http.AuthenticationRoute.Unknown;
-        activity.DisplayName = database ? collection.DatabaseSpanName : collection.InvocationSpanNames.GetValueOrDefault(route, collection.InvocationSpanName);
-        if (!database)
+        if (database)
+            activity.DisplayName = collection.DatabaseSpanName;
+        else
         {
-            activity.SetTag("http.request.method", "POST");
+            var route = activity.GetCustomProperty(RouteProperty) as string ?? Http.AuthenticationRoute.Unknown;
+            var method = activity.GetCustomProperty(MethodProperty) as string ?? "OTHER";
+            activity.DisplayName = route == Http.AuthenticationRoute.Unknown ? collection.InvocationSpanName : $"{method} {route}";
+            activity.SetTag("http.request.method", method);
             activity.SetTag("http.route", route);
         }
         if (activity.Status == ActivityStatusCode.Error)

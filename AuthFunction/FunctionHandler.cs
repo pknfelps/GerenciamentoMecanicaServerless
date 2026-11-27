@@ -78,16 +78,25 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         var route = AuthenticationRoute.Resolve(request);
         var traceId = Activity.Current?.Id ?? request.RequestContext?.RequestId ?? context.AwsRequestId ?? string.Empty;
         if (route == AuthenticationRoute.Unknown)
+        {
             response = AuthenticationResponse.NotFound();
+            category = "route-not-found";
+        }
         else if (route == AuthenticationRoute.InternalUsers)
             (response, category) = await ExecuteWithDeadlineAsync(token => ExecuteInternalUsersAsync(request, traceId, token), route, context);
         else if (request.HttpMethod != "POST")
+        {
             response = AuthenticationResponse.MethodNotAllowed(route);
+            category = "method-not-allowed";
+        }
         else if (route == AuthenticationRoute.InternalLogin)
         {
             var invalid = InternalUserRequestParser.ParseCredentials(request, traceId, out var loginInput);
             if (invalid is not null)
+            {
                 response = invalid;
+                if (invalid.StatusCode == 415) category = "unsupported-media-type";
+            }
             else
                 (response, category) = await ExecuteWithDeadlineAsync(
                     token => ExecuteInternalLoginAsync(request, loginInput!, token), route, context);
@@ -102,19 +111,7 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
             (response, category) = await ExecuteWithDeadlineAsync(token => ExecuteAsync(input!, route, token), route, context);
         }
 
-        if (observability is not null)
-            observability.Complete(context, request, response.StatusCode, category, elapsed.Elapsed);
-        else
-        {
-            context.Logger.LogLine(JsonSerializer.Serialize(new
-            {
-                lambdaRequestId = context.AwsRequestId,
-                gatewayRequestId = request.RequestContext?.RequestId,
-                status = response.StatusCode,
-                durationMs = elapsed.ElapsedMilliseconds,
-                category
-            }));
-        }
+        LambdaObservability.Complete(observability, context, request, route, response.StatusCode, category, elapsed.Elapsed);
 
         return response;
     }
@@ -149,7 +146,17 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         APIGatewayProxyRequest request, string traceId, CancellationToken cancellationToken)
     {
         var response = await InternalUsersEndpoint.ExecuteAsync(request, traceId, runtime, cancellationToken);
-        return (response, "user-management");
+        return (response, response.StatusCode switch
+        {
+            200 or 201 or 204 => "success",
+            401 => "unauthenticated",
+            403 => "access-denied",
+            404 => "user-not-found",
+            405 => "method-not-allowed",
+            409 => "user-conflict",
+            415 => "unsupported-media-type",
+            _ => "invalid-request"
+        });
     }
 
     private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteInternalLoginAsync(

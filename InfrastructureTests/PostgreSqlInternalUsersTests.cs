@@ -80,6 +80,11 @@ public sealed class PostgreSqlInternalUsersTests
         const string renamed = "Conta Revisada";
         var admin = Token("Admin");
         var account = await RegisterAsync(name, "Mechanic", admin);
+        await using var database = new NpgsqlConnection(container.GetConnectionString());
+        await database.OpenAsync();
+        await using var readHash = new NpgsqlCommand("SELECT password FROM public.users WHERE id = @id", database);
+        readHash.Parameters.AddWithValue("id", account.Id);
+        var storedHash = (string)(await readHash.ExecuteScalarAsync())!;
         var mechanic = await LoginAsync(name, InitialPassword, "Mechanic");
 
         var own = await RequestAsync("GET", mechanic);
@@ -106,6 +111,23 @@ public sealed class PostgreSqlInternalUsersTests
         Assert.That((await RequestAsync("DELETE", admin, query: UserId(account.Id))).StatusCode, Is.EqualTo(204));
         Assert.That((await RequestAsync("GET", admin, query: Filters(renamed, "Mechanic"))).StatusCode, Is.EqualTo(404));
         Assert.That((await RequestAsync("GET", mechanic)).StatusCode, Is.EqualTo(404));
+
+        var logs = context.Logger.ReceivedCalls().Select(call => (string)call.GetArguments()[0]!).ToArray();
+        var accounts = logs.Select(line =>
+        {
+            using var json = JsonDocument.Parse(line);
+            return json.RootElement.Clone();
+        }).Where(log => log.GetProperty("http.route").GetString() == "/Users").ToArray();
+        var successfulMethods = accounts.Where(log => log.GetProperty("category").GetString() == "success")
+            .Select(log => log.GetProperty("http.request.method").GetString()).Distinct();
+        Assert.Multiple(() =>
+        {
+            Assert.That(successfulMethods, Is.EquivalentTo(new[] { "POST", "GET", "PATCH", "DELETE" }));
+            Assert.That(accounts.Select(log => log.GetProperty("category").GetString()), Does.Contain("access-denied").And.Contain("user-not-found"));
+            Assert.That(string.Join("\n", logs), Does.Not.Contain(name).And.Not.Contain(renamed)
+                .And.Not.Contain(InitialPassword).And.Not.Contain(NewPassword).And.Not.Contain(storedHash)
+                .And.Not.Contain(admin).And.Not.Contain(mechanic));
+        });
     }
 
     [Test]
