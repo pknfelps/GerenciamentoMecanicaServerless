@@ -38,7 +38,7 @@ public static class AuthenticationResponse
     }
     private static APIGatewayProxyResponse Problem(int status, string title, string detail, string route) =>
         Create(status, "application/problem+json", JsonSerializer.Serialize(new AuthenticationProblem(status, title, detail, route), JsonOptions));
-    private static APIGatewayProxyResponse Create(int status, string contentType, string body) => new()
+    internal static APIGatewayProxyResponse Create(int status, string contentType, string body) => new()
     {
         StatusCode = status,
         Body = body,

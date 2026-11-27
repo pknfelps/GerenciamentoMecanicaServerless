@@ -1,4 +1,5 @@
 using Amazon.Lambda;
+using GerenciamentoMecanica.Auth.Contracts;
 using GerenciamentoMecanica.Autenticacao.Infrastructure.Observability;
 using GerenciamentoMecanica.Autenticacao.Application.Authentication;
 using GerenciamentoMecanica.Autenticacao.Infrastructure.Authentication;
@@ -18,6 +19,7 @@ public sealed class FunctionRuntime : IDisposable, IAsyncDisposable
     public NpgsqlDataSource Database { get; }
     public RequestCustomerCodeUseCase RequestCode { get; }
     public VerifyCustomerCodeUseCase VerifyCode { get; }
+    public InternalLoginUseCase InternalLogin { get; }
 
     public FunctionRuntime(RuntimeConfiguration configuration, IntegrationMetrics? metrics = null,
         ICustomerCodeSender? sender = null, ILogger<PostgreSqlCustomerAccessStore>? logger = null)
@@ -40,6 +42,9 @@ public sealed class FunctionRuntime : IDisposable, IAsyncDisposable
             RequestCode = new RequestCustomerCodeUseCase(normalizer, store, sender,
                 type => diagnostics.LogWarning("Não foi possível invalidar o desafio de autenticação. Tipo: {ExceptionType}", type));
             VerifyCode = new VerifyCustomerCodeUseCase(normalizer, store, new CustomerTokenIssuer(Jwt));
+            var jwtIssuer = new JwtIssuer(Jwt.Key, Jwt.Issuer, Jwt.Audience);
+            InternalLogin = new InternalLoginUseCase(new PostgreSqlInternalUserCredentialsStore(Database, metrics),
+                new Pbkdf2PasswordVerifier(), (name, role, id) => jwtIssuer.Generate(name, role, id));
         }
         catch { emailClient?.Dispose(); Database.Dispose(); throw; }
     }

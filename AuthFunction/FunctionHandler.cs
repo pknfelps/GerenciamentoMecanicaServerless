@@ -15,6 +15,7 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
     private readonly LambdaObservability? observability;
     private readonly Func<string?, CancellationToken, Task<CustomerCodeRequestResponse>> requestCode;
     private readonly Func<Guid, string?, string?, CancellationToken, Task<CustomerAuthenticationResult>> verifyCode;
+    private readonly Func<string, string, string, CancellationToken, Task<string?>> internalLogin;
 
     public FunctionHandler() : this(LambdaObservability.CreateDefault())
     {
@@ -33,16 +34,19 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         this.observability = observability;
         requestCode = runtime.RequestCodeAsync;
         verifyCode = runtime.VerifyCodeAsync;
+        internalLogin = runtime.InternalLoginAsync;
     }
 
     public FunctionHandler(Func<string?, CancellationToken, Task<CustomerCodeRequestResponse>> requestCode,
         Func<Guid, string?, string?, CancellationToken, Task<CustomerAuthenticationResult>> verifyCode,
-        LambdaObservability? observability = null)
+        LambdaObservability? observability = null,
+        Func<string, string, string, CancellationToken, Task<string?>>? internalLogin = null)
     {
         ArgumentNullException.ThrowIfNull(requestCode);
         ArgumentNullException.ThrowIfNull(verifyCode);
         this.requestCode = requestCode;
         this.verifyCode = verifyCode;
+        this.internalLogin = internalLogin ?? ((_, _, _, _) => throw new InvalidOperationException("Internal login is not configured."));
         this.observability = observability;
     }
 
@@ -63,6 +67,16 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
             response = AuthenticationResponse.NotFound();
         else if (request.HttpMethod != "POST")
             response = AuthenticationResponse.MethodNotAllowed(route);
+        else if (route == AuthenticationRoute.InternalLogin)
+        {
+            var traceId = Activity.Current?.Id ?? request.RequestContext?.RequestId ?? context.AwsRequestId ?? string.Empty;
+            var invalid = InternalLoginRequestParser.Parse(request, traceId, out var loginInput);
+            if (invalid is not null)
+                response = invalid;
+            else
+                (response, category) = await ExecuteWithDeadlineAsync(
+                    token => ExecuteInternalLoginAsync(request, loginInput!, token), route, context);
+        }
         else if (!CustomerCodeRequestParser.TryParse(request, route, out var input, out var invalidDocument))
         {
             response = AuthenticationResponse.InvalidRequest(route);
@@ -70,21 +84,7 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         }
         else
         {
-            var budget = context.RemainingTime - TimeSpan.FromSeconds(1);
-            using var cancellation = new CancellationTokenSource();
-            try
-            {
-                if (budget <= TimeSpan.Zero) throw new OperationCanceledException();
-                cancellation.CancelAfter(budget);
-                (response, category) = await ExecuteAsync(input!, route, cancellation.Token).WaitAsync(cancellation.Token);
-                cancellation.Token.ThrowIfCancellationRequested();
-            }
-            catch (Exception error)
-            {
-                observability?.RecordException(error);
-                response = AuthenticationResponse.TechnicalFailure(route);
-                category = error is OperationCanceledException or TimeoutException || cancellation.IsCancellationRequested ? "timeout" : "technical-failure";
-            }
+            (response, category) = await ExecuteWithDeadlineAsync(token => ExecuteAsync(input!, route, token), route, context);
         }
 
         if (observability is not null)
@@ -102,6 +102,40 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         }
 
         return response;
+    }
+
+    private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteWithDeadlineAsync(
+        Func<CancellationToken, Task<(APIGatewayProxyResponse Response, string Category)>> execute,
+        string route, ILambdaContext context)
+    {
+        var budget = context.RemainingTime - TimeSpan.FromSeconds(1);
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            if (budget <= TimeSpan.Zero) throw new OperationCanceledException();
+            cancellation.CancelAfter(budget);
+            var result = await execute(cancellation.Token).WaitAsync(cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (Exception error)
+        {
+            observability?.RecordException(error);
+            var response = route == AuthenticationRoute.InternalLogin
+                ? InternalLoginResponse.TechnicalFailure()
+                : AuthenticationResponse.TechnicalFailure(route);
+            var category = error is OperationCanceledException or TimeoutException || cancellation.IsCancellationRequested
+                ? "timeout" : "technical-failure";
+            return (response, category);
+        }
+    }
+
+    private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteInternalLoginAsync(
+        APIGatewayProxyRequest request, InternalLoginInput input, CancellationToken cancellationToken)
+    {
+        var token = await internalLogin(input.Name!, input.Password!, input.Role!, cancellationToken);
+        var response = InternalLoginResponse.FromToken(request, token);
+        return (response, response.StatusCode == 200 ? "authenticated" : "invalid-credentials");
     }
 
     private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteAsync(CustomerCodeInput input, string route, CancellationToken cancellationToken)
