@@ -96,6 +96,17 @@ jobs:
             unexpected="$(find ".aws-sam/build/$FUNCTION_RESOURCE" \( -name 'Npgsql.dll' -o -name '*Autenticacao*.dll' -o -iname '*Tests.dll' \) -print -quit)"
             test -z "$unexpected"
           fi
+      - name: Validate identity contract
+        if: ${{ inputs.component == 'auth' }}
+        run: |
+          jq -e '
+            . as $contract |
+            (.openapi | startswith("3.0.")) and .info.version == "2.1.0" and
+            (.paths | keys == ["/Authentication", "/Users", "/customers/auth/request-code", "/customers/auth/verify-code"]) and
+            all(["/Authentication", "/customers/auth/request-code", "/customers/auth/verify-code"][];
+              ($contract.paths[.] | keys == ["post"] and .post.security == [])) and
+            (.paths["/Users"] | keys == ["delete", "get", "patch", "post"] and all(.[]; .security == [{"Bearer":[]}]))
+          ' contracts/openapi.json > /dev/null
       - name: Archive SAM build with its directory structure
         run: |
           set -euo pipefail

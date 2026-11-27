@@ -77,8 +77,12 @@ jobs:
           [[ "$hash" =~ ^[0-9a-f]{64}$ ]]
           printf '%s  %s\n' "$hash" "$template" | sha256sum --check --strict
           if [ "$COMPONENT" = auth ]; then
-            jq -e '.Resources.AuthFunction.Properties.Environment.Variables.Telemetry__Enabled == "true" and .Resources.AuthFunction.Properties.Tracing == "Active"' "$template" > /dev/null || {
-              echo '::error::Publique auth com OpenTelemetry, New Relic e X-Ray ativos.'; exit 1;
+            jq -e '
+              .Resources.AuthFunction.Properties.Environment.Variables.Telemetry__Enabled == "true" and
+              .Resources.AuthFunction.Properties.Tracing == "Active" and
+              .Resources.ApiSyncContractParameter.Properties.Value["Fn::Join"][1][0] == "1"
+            ' "$template" > /dev/null || {
+              echo '::error::Publique auth com telemetria ativa e contrato de sincronizacao v1.'; exit 1;
             }
           fi
           jq -e '
@@ -174,6 +178,21 @@ jobs:
             any(.[]; (.Name | endswith("/invocation-arn")) and .Value == $arn) and
             any(.[]; (.Name | endswith("/contract-version")) and .Value == "1"))
           ' "$RUNNER_TEMP/email.json" > /dev/null || { echo '::error::Conclua email-provision com contrato v1 antes de auth-provision.'; exit 1; }
+      - name: Check initialized database schemas
+        if: ${{ inputs.component == 'auth' }}
+        run: |
+          set -euo pipefail
+          prefix="/mecanica/$TARGET_ENVIRONMENT/database/v2"
+          if ! target="$(aws ssm get-parameter --name "$prefix/initialization-target" --query 'Parameter.Value' --output text)" ||
+             ! ready="$(aws ssm get-parameter --name "$prefix/initialized" --query 'Parameter.Value' --output text)" ||
+             ! jq -e --argjson target "$target" '
+               (.commit | test("^[0-9a-f]{40}$")) and del(.commit) == $target and
+               .operationalVersion == "2.1.0" and .identityVersion == "1.0.0"
+             ' <<< "$ready" > /dev/null; then
+            echo '::error::Conclua database-provision com os dois schemas inicializados antes de auth-provision.'
+            exit 1
+          fi
+          printf '\nDatabase revision: `%s`.\n' "$(jq -r .commit <<< "$ready")" >> "$GITHUB_STEP_SUMMARY"
       - name: Check New Relic credential metadata
         if: ${{ inputs.component == 'auth' }}
         run: |
@@ -200,6 +219,13 @@ jobs:
             --no-confirm-changeset --no-fail-on-empty-changeset --no-progressbar \
             | tee artifacts/deploy/sam-deploy.txt
           aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].Outputs' --output json > artifacts/deploy/outputs.json
+          if [ "$COMPONENT" = auth ]; then
+            version="$(jq -er '.[] | select(.OutputKey == "FunctionVersion") | .OutputValue | select(test("^[1-9][0-9]*$"))' artifacts/deploy/outputs.json)"
+            alias_version="$(aws lambda get-alias --function-name "$STACK_NAME" --name live --query 'FunctionVersion' --output text)"
+            test "$alias_version" = "$version"
+            sync_contract="$(aws ssm get-parameter --name "/mecanica/$TARGET_ENVIRONMENT/auth/v2/api-sync-version" --query 'Parameter.Value' --output text)"
+            test "$sync_contract" = "1:$version"
+          fi
           {
             echo "SAM concluido: $STACK_NAME; ambiente: $TARGET_ENVIRONMENT; codigo/template: $ARTIFACT_COMMIT; workflow: $GITHUB_SHA."
             echo "ZIP: $ZIP_KEY; S3 VersionId: $ZIP_VERSION."
