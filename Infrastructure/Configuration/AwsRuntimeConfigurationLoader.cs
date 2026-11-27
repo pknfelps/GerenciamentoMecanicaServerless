@@ -37,7 +37,7 @@ public sealed class AwsRuntimeConfigurationLoader(
             string[] names =
             [
                 basePrefix + "jwt-secret-arn", basePrefix + "jwt-issuer", basePrefix + "jwt-audience",
-                databasePrefix + "endpoint", databasePrefix + "port", databasePrefix + "database-name",
+                databasePrefix + "endpoint", databasePrefix + "port", databasePrefix + "auth-database-name",
                 databasePrefix + "auth-secret-arn", databasePrefix + "auth-db-user", databasePrefix + "ssl-mode"
             ];
 
@@ -62,6 +62,10 @@ public sealed class AwsRuntimeConfigurationLoader(
 
             ValidateSecretArn(jwtArn, environment, "base/jwt");
             ValidateSecretArn(databaseArn, environment, "database/auth");
+
+            var databaseName = values[databasePrefix + "auth-database-name"];
+            if (databaseName != "mecanica_identity")
+                throw new ConfigurationValidationException("Database auth name must be mecanica_identity.");
 
             if (values[databasePrefix + "auth-db-user"] != "mecanica_auth")
                 throw new ConfigurationValidationException("Database auth user must be mecanica_auth.");
@@ -103,7 +107,7 @@ public sealed class AwsRuntimeConfigurationLoader(
             {
                 Host = values[databasePrefix + "endpoint"],
                 Port = port,
-                Database = values[databasePrefix + "database-name"],
+                Database = databaseName,
                 Username = username,
                 Password = password,
                 SslMode = SslMode.VerifyFull,

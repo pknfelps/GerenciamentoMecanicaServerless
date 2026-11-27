@@ -58,7 +58,7 @@ public class RuntimeConfigurationTests
             ["base/v2/jwt-audience"] = $"mecanica-{name}-api",
             ["database/v2/endpoint"] = "127.0.0.1",
             ["database/v2/port"] = "5432",
-            ["database/v2/database-name"] = "mecanica",
+            ["database/v2/auth-database-name"] = "mecanica_identity",
             ["database/v2/auth-secret-arn"] = SecretArn("database/auth"),
             ["database/v2/auth-db-user"] = "mecanica_auth",
             ["database/v2/ssl-mode"] = "verify-full"
@@ -213,7 +213,7 @@ public class RuntimeConfigurationTests
             Assert.That(configuration.Jwt.Audience, Is.EqualTo($"mecanica-{name}-api"));
             Assert.That(builder.Host, Is.EqualTo("127.0.0.1"));
             Assert.That(builder.Port, Is.EqualTo(5432));
-            Assert.That(builder.Database, Is.EqualTo("mecanica"));
+            Assert.That(builder.Database, Is.EqualTo("mecanica_identity"));
             Assert.That(builder.Username, Is.EqualTo("mecanica_auth"));
             Assert.That(builder.Password, Is.EqualTo(FakePassword));
             Assert.That(builder.SslMode, Is.EqualTo(SslMode.VerifyFull));
@@ -227,7 +227,9 @@ public class RuntimeConfigurationTests
         });
 
         await parameters.Received(1).GetParametersAsync(Arg.Is<GetParametersRequest>(request =>
-                request.WithDecryption == false && request.Names.Count == 9 && request.Names.All(name => !name.Contains("/email/"))),
+                request.WithDecryption == false && request.Names.Count == 9 && request.Names.All(parameterName => !parameterName.Contains("/email/"))
+                    && request.Names.Contains($"/mecanica/{name}/database/v2/auth-database-name")
+                    && !request.Names.Contains($"/mecanica/{name}/database/v2/database-name")),
             Arg.Any<CancellationToken>());
 
         await secrets.Received(1).GetSecretValueAsync(Arg.Is<GetSecretValueRequest>(request =>
@@ -278,7 +280,7 @@ public class RuntimeConfigurationTests
     [TestCase("base/v2/jwt-audience")]
     [TestCase("database/v2/endpoint")]
     [TestCase("database/v2/port")]
-    [TestCase("database/v2/database-name")]
+    [TestCase("database/v2/auth-database-name")]
     [TestCase("database/v2/auth-secret-arn")]
     [TestCase("database/v2/auth-db-user")]
     [TestCase("database/v2/ssl-mode")]
@@ -334,11 +336,13 @@ public class RuntimeConfigurationTests
     }
 
     [TestCase("database/v2/auth-db-user", "mecanica_api")]
+    [TestCase("database/v2/auth-database-name", "mecanica")]
     [TestCase("database/v2/ssl-mode", "require")]
     public void RejectsIncorrectDatabaseParameters(string field, string value)
     {
         Parameter(field).Value = value;
         AssertSanitized(Assert.ThrowsAsync<InvalidOperationException>(() => LoadAsync())!);
+        Assert.That(secrets.ReceivedCalls(), Is.Empty);
     }
 
     [TestCase("base/v2/jwt-secret-arn", "prd", "us-east-1", "121754142617", "base/jwt", "aB1234")]
