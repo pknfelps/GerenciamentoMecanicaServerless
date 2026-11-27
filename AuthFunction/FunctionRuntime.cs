@@ -22,6 +22,7 @@ public sealed class FunctionRuntime : IDisposable, IAsyncDisposable
     public InternalLoginUseCase InternalLogin { get; }
     public InternalUsersUseCase InternalUsers { get; }
     public InternalUserTokenValidator InternalUserTokens { get; }
+    public PostgreSqlCustomerAccessStore CustomerAccess { get; }
 
     public FunctionRuntime(RuntimeConfiguration configuration, IntegrationMetrics? metrics = null,
         ICustomerCodeSender? sender = null, ILogger<PostgreSqlCustomerAccessStore>? logger = null)
@@ -40,6 +41,7 @@ public sealed class FunctionRuntime : IDisposable, IAsyncDisposable
             }
             var diagnostics = new FunctionDiagnosticLogger<PostgreSqlCustomerAccessStore>(logger);
             var store = new PostgreSqlCustomerAccessStore(Database, diagnostics, metrics);
+            CustomerAccess = store;
             var normalizer = new CustomerDocumentNormalizer();
             RequestCode = new RequestCustomerCodeUseCase(normalizer, store, sender,
                 type => diagnostics.LogWarning("Não foi possível invalidar o desafio de autenticação. Tipo: {ExceptionType}", type));

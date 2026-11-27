@@ -5,6 +5,7 @@ using GerenciamentoMecanica.Autenticacao.Application.Authentication;
 using GerenciamentoMecanica.Autenticacao.Function.Http;
 using GerenciamentoMecanica.Autenticacao.Function.Observability;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 namespace GerenciamentoMecanica.Autenticacao.Function;
@@ -48,6 +49,18 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         this.verifyCode = verifyCode;
         this.internalLogin = internalLogin ?? ((_, _, _, _) => throw new InvalidOperationException("Internal login is not configured."));
         this.observability = observability;
+    }
+
+    [LambdaSerializer(typeof(DefaultLambdaJsonSerializer))]
+    public async Task<object> HandleInvocationAsync(JsonElement invocation, ILambdaContext context)
+    {
+        // API Gateway puts user input in the body string. Only a direct Lambda event can have this root marker.
+        if (invocation.ValueKind == JsonValueKind.Object && invocation.TryGetProperty("operation", out _))
+            return await CustomerAccessInvocation.HandleAsync(invocation, context, runtime);
+
+        using var payload = new MemoryStream(Encoding.UTF8.GetBytes(invocation.GetRawText()));
+        var request = new DefaultLambdaJsonSerializer().Deserialize<APIGatewayProxyRequest>(payload);
+        return await HandleAsync(request, context);
     }
 
     [LambdaSerializer(typeof(DefaultLambdaJsonSerializer))]

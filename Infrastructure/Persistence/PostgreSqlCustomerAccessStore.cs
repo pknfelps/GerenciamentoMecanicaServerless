@@ -1,6 +1,7 @@
 using System.Net.Mail;
 using System.Security.Cryptography;
 using Dapper;
+using GerenciamentoMecanica.Auth.Contracts;
 using GerenciamentoMecanica.Autenticacao.Application.Authentication;
 using GerenciamentoMecanica.Autenticacao.Domain.Customers;
 using GerenciamentoMecanica.Autenticacao.Infrastructure.Authentication;
@@ -21,6 +22,82 @@ public sealed class PostgreSqlCustomerAccessStore(
         created_at AS CreatedAt, expires_at AS ExpiresAt, state, failed_attempts AS FailedAttempts,
         consumed_at AS ConsumedAt, invalidated_at AS InvalidatedAt
         """;
+
+    public async Task<CustomerAccessWriteOutcome> SynchronizeAsync(
+        CustomerAccessSyncCommand command, CancellationToken cancellationToken)
+    {
+        if (!command.IsValid())
+            return CustomerAccessWriteOutcome.Rejected;
+        if (command.Access is { } input)
+        {
+            try
+            {
+                if (DocumentRules.Normalize(input.Document) != input.Document)
+                    return CustomerAccessWriteOutcome.Rejected;
+            }
+            catch (FormatException) { return CustomerAccessWriteOutcome.Rejected; }
+        }
+
+        await using var connection = await OpenAsync(cancellationToken);
+        try
+        {
+            return await InCustomerTransactionAsync(connection, command.CustomerId, async transaction =>
+            {
+                var current = await ReadAsync<AccessRevision>(connection, transaction, """
+                    SELECT revision, name, document, email, status FROM public.customer_access WHERE customer_id = @CustomerId;
+                    """, new { command.CustomerId }, cancellationToken);
+                var access = command.Access;
+                var status = access?.Status ?? "Revoked";
+                if (current is not null)
+                {
+                    if (current.Revision > command.Revision)
+                        return CustomerAccessWriteOutcome.Stale;
+                    if (current.Revision == command.Revision)
+                        return current.Name == access?.Name && current.Document == access?.Document
+                            && current.Email == access?.Email && current.Status == status
+                            ? CustomerAccessWriteOutcome.Applied
+                            : CustomerAccessWriteOutcome.Rejected;
+                    if (current.Status == "Revoked" && access is not null)
+                        return CustomerAccessWriteOutcome.Rejected;
+                }
+
+                await ExecuteAsync(connection, transaction, """
+                    INSERT INTO public.customer_access(customer_id, name, document, email, status, revision)
+                    VALUES (@CustomerId, @Name, @Document, @Email, @Status, @Revision)
+                    ON CONFLICT (customer_id) DO UPDATE SET
+                        name = EXCLUDED.name, document = EXCLUDED.document, email = EXCLUDED.email,
+                        status = EXCLUDED.status, revision = EXCLUDED.revision;
+                    """, new { command.CustomerId, command.Revision, Name = access?.Name, Document = access?.Document,
+                        Email = access?.Email, Status = status },
+                    cancellationToken);
+
+                if (status == "Revoked" || current is not null &&
+                    (current.Email != access?.Email || (status == "Inactive" && current.Status != status)))
+                {
+                    await ExecuteAsync(connection, transaction, """
+                        UPDATE public.customer_auth_challenges SET state = 'Invalidated', invalidated_at = clock_timestamp()
+                        WHERE customer_id = @CustomerId AND state IN ('Pending', 'Ready');
+                        """, new { command.CustomerId }, cancellationToken);
+                }
+
+                return CustomerAccessWriteOutcome.Applied;
+            }, cancellationToken);
+        }
+        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation
+            && error.ConstraintName == "customer_access_document_key")
+        {
+            return CustomerAccessWriteOutcome.DocumentConflict;
+        }
+    }
+
+    private sealed class AccessRevision
+    {
+        public long Revision { get; set; }
+        public string? Name { get; set; }
+        public string? Document { get; set; }
+        public string? Email { get; set; }
+        public string? Status { get; set; }
+    }
 
     public async Task<CustomerCodeRequestResult> CreatePendingAsync(string canonicalDocument,
         CancellationToken cancellationToken = default)

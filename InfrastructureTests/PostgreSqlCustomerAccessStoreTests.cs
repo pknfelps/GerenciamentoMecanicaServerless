@@ -416,6 +416,53 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
         tokens.DidNotReceive().Generate(Arg.Any<CustomerIdentity>());
     }
 
+    [Test]
+    public async Task SyncReplaysOnlyIdenticalRevisionsAndEmailChangeInvalidatesOpenCode()
+    {
+        var ready = await ReadyAsync();
+        var changed = Synchronization(2, "new-contact@example.invalid");
+        Assert.That(await store.SynchronizeAsync(changed, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(changed, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(Synchronization(2, "different@example.invalid"), CancellationToken.None),
+            Is.EqualTo(CustomerAccessWriteOutcome.Rejected));
+        Assert.That(await store.SynchronizeAsync(Synchronization(1, "older@example.invalid"), CancellationToken.None),
+            Is.EqualTo(CustomerAccessWriteOutcome.Stale));
+        Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Invalidated"));
+        Assert.That((await store.VerifyAndConsumeAsync(ready.ChallengeId, Document, Code, tokens)).Token, Is.Null);
+    }
+
+    [Test]
+    public async Task RevocationRetainsTheRevisionAndRejectsOlderUpserts()
+    {
+        var ready = await ReadyAsync();
+        var revoke = Synchronization(2, null);
+        Assert.That(await store.SynchronizeAsync(revoke, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(revoke, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(Synchronization(1, "older@example.invalid"), CancellationToken.None),
+            Is.EqualTo(CustomerAccessWriteOutcome.Stale));
+        Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Invalidated"));
+        Assert.That((await store.CreatePendingAsync(Document)).Outcome, Is.EqualTo(CustomerCodeRequestOutcome.CustomerNotFound));
+        Assert.That(await ScalarAsync<int>("SELECT count(*) FROM customer_access WHERE status='Revoked' AND revision=2 AND document IS NULL"),
+            Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task DuplicateDocumentIsAConflictWithoutChangingTheAccessOrChallenge()
+    {
+        var ready = await ReadyAsync();
+        var duplicate = Synchronization(1, "new-contact@example.invalid", OtherDocument);
+        Assert.That(await store.SynchronizeAsync(duplicate, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.DocumentConflict));
+        Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Ready"));
+        Assert.That((await store.VerifyAndConsumeAsync(ready.ChallengeId, Document, Code, tokens)).Token, Is.Not.Null);
+    }
+
+    private static CustomerAccessSyncCommand Synchronization(long revision, string? email, string document = Document) => new()
+    {
+        Operation = CustomerAccessSyncCommand.SyncOperation, Version = 1, CustomerId = CustomerId, Revision = revision,
+        Action = email is null ? "revoke" : "upsert",
+        Access = email is null ? null : new() { Name = "Cliente local", Document = document, Email = email, Status = "Active" }
+    };
+
     private Task RemoveAccessAsync(string reason) => SqlAsync(reason switch
     {
         "missing" => "DELETE FROM customer_access WHERE customer_id=@CustomerId",
