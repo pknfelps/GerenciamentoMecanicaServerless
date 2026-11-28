@@ -5,6 +5,7 @@ using GerenciamentoMecanica.Autenticacao.Application.Authentication;
 using GerenciamentoMecanica.Autenticacao.Function.Http;
 using GerenciamentoMecanica.Autenticacao.Function.Observability;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 namespace GerenciamentoMecanica.Autenticacao.Function;
@@ -15,6 +16,7 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
     private readonly LambdaObservability? observability;
     private readonly Func<string?, CancellationToken, Task<CustomerCodeRequestResponse>> requestCode;
     private readonly Func<Guid, string?, string?, CancellationToken, Task<CustomerAuthenticationResult>> verifyCode;
+    private readonly Func<string, string, string, CancellationToken, Task<string?>> internalLogin;
 
     public FunctionHandler() : this(LambdaObservability.CreateDefault())
     {
@@ -33,17 +35,32 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         this.observability = observability;
         requestCode = runtime.RequestCodeAsync;
         verifyCode = runtime.VerifyCodeAsync;
+        internalLogin = runtime.InternalLoginAsync;
     }
 
     public FunctionHandler(Func<string?, CancellationToken, Task<CustomerCodeRequestResponse>> requestCode,
         Func<Guid, string?, string?, CancellationToken, Task<CustomerAuthenticationResult>> verifyCode,
-        LambdaObservability? observability = null)
+        LambdaObservability? observability = null,
+        Func<string, string, string, CancellationToken, Task<string?>>? internalLogin = null)
     {
         ArgumentNullException.ThrowIfNull(requestCode);
         ArgumentNullException.ThrowIfNull(verifyCode);
         this.requestCode = requestCode;
         this.verifyCode = verifyCode;
+        this.internalLogin = internalLogin ?? ((_, _, _, _) => throw new InvalidOperationException("Internal login is not configured."));
         this.observability = observability;
+    }
+
+    [LambdaSerializer(typeof(DefaultLambdaJsonSerializer))]
+    public async Task<object> HandleInvocationAsync(JsonElement invocation, ILambdaContext context)
+    {
+        // API Gateway puts user input in the body string. Only a direct Lambda event can have this root marker.
+        if (invocation.ValueKind == JsonValueKind.Object && invocation.TryGetProperty("operation", out _))
+            return await CustomerAccessInvocation.HandleAsync(invocation, context, runtime);
+
+        using var payload = new MemoryStream(Encoding.UTF8.GetBytes(invocation.GetRawText()));
+        var request = new DefaultLambdaJsonSerializer().Deserialize<APIGatewayProxyRequest>(payload);
+        return await HandleAsync(request, context);
     }
 
     [LambdaSerializer(typeof(DefaultLambdaJsonSerializer))]
@@ -59,10 +76,31 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         var category = "invalid-request";
 
         var route = AuthenticationRoute.Resolve(request);
+        var traceId = Activity.Current?.Id ?? request.RequestContext?.RequestId ?? context.AwsRequestId ?? string.Empty;
         if (route == AuthenticationRoute.Unknown)
+        {
             response = AuthenticationResponse.NotFound();
+            category = "route-not-found";
+        }
+        else if (route == AuthenticationRoute.InternalUsers)
+            (response, category) = await ExecuteWithDeadlineAsync(token => ExecuteInternalUsersAsync(request, traceId, token), route, context);
         else if (request.HttpMethod != "POST")
+        {
             response = AuthenticationResponse.MethodNotAllowed(route);
+            category = "method-not-allowed";
+        }
+        else if (route == AuthenticationRoute.InternalLogin)
+        {
+            var invalid = InternalUserRequestParser.ParseCredentials(request, traceId, out var loginInput);
+            if (invalid is not null)
+            {
+                response = invalid;
+                if (invalid.StatusCode == 415) category = "unsupported-media-type";
+            }
+            else
+                (response, category) = await ExecuteWithDeadlineAsync(
+                    token => ExecuteInternalLoginAsync(request, loginInput!, token), route, context);
+        }
         else if (!CustomerCodeRequestParser.TryParse(request, route, out var input, out var invalidDocument))
         {
             response = AuthenticationResponse.InvalidRequest(route);
@@ -70,38 +108,63 @@ public sealed class FunctionHandler : IDisposable, IAsyncDisposable
         }
         else
         {
-            var budget = context.RemainingTime - TimeSpan.FromSeconds(1);
-            using var cancellation = new CancellationTokenSource();
-            try
-            {
-                if (budget <= TimeSpan.Zero) throw new OperationCanceledException();
-                cancellation.CancelAfter(budget);
-                (response, category) = await ExecuteAsync(input!, route, cancellation.Token).WaitAsync(cancellation.Token);
-                cancellation.Token.ThrowIfCancellationRequested();
-            }
-            catch (Exception error)
-            {
-                observability?.RecordException(error);
-                response = AuthenticationResponse.TechnicalFailure(route);
-                category = error is OperationCanceledException or TimeoutException || cancellation.IsCancellationRequested ? "timeout" : "technical-failure";
-            }
+            (response, category) = await ExecuteWithDeadlineAsync(token => ExecuteAsync(input!, route, token), route, context);
         }
 
-        if (observability is not null)
-            observability.Complete(context, request, response.StatusCode, category, elapsed.Elapsed);
-        else
-        {
-            context.Logger.LogLine(JsonSerializer.Serialize(new
-            {
-                lambdaRequestId = context.AwsRequestId,
-                gatewayRequestId = request.RequestContext?.RequestId,
-                status = response.StatusCode,
-                durationMs = elapsed.ElapsedMilliseconds,
-                category
-            }));
-        }
+        LambdaObservability.Complete(observability, context, request, route, response.StatusCode, category, elapsed.Elapsed);
 
         return response;
+    }
+
+    private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteWithDeadlineAsync(
+        Func<CancellationToken, Task<(APIGatewayProxyResponse Response, string Category)>> execute,
+        string route, ILambdaContext context)
+    {
+        var budget = context.RemainingTime - TimeSpan.FromSeconds(1);
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            if (budget <= TimeSpan.Zero) throw new OperationCanceledException();
+            cancellation.CancelAfter(budget);
+            var result = await execute(cancellation.Token).WaitAsync(cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (Exception error)
+        {
+            observability?.RecordException(error);
+            var response = route is AuthenticationRoute.InternalLogin or AuthenticationRoute.InternalUsers
+                ? InternalAuthResponse.TechnicalFailure(route)
+                : AuthenticationResponse.TechnicalFailure(route);
+            var category = error is OperationCanceledException or TimeoutException || cancellation.IsCancellationRequested
+                ? "timeout" : "technical-failure";
+            return (response, category);
+        }
+    }
+
+    private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteInternalUsersAsync(
+        APIGatewayProxyRequest request, string traceId, CancellationToken cancellationToken)
+    {
+        var response = await InternalUsersEndpoint.ExecuteAsync(request, traceId, runtime, cancellationToken);
+        return (response, response.StatusCode switch
+        {
+            200 or 201 or 204 => "success",
+            401 => "unauthenticated",
+            403 => "access-denied",
+            404 => "user-not-found",
+            405 => "method-not-allowed",
+            409 => "user-conflict",
+            415 => "unsupported-media-type",
+            _ => "invalid-request"
+        });
+    }
+
+    private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteInternalLoginAsync(
+        APIGatewayProxyRequest request, InternalLoginInput input, CancellationToken cancellationToken)
+    {
+        var token = await internalLogin(input.Name!, input.Password!, input.Role!, cancellationToken);
+        var response = InternalAuthResponse.FromToken(request, token);
+        return (response, response.StatusCode == 200 ? "authenticated" : "invalid-credentials");
     }
 
     private async Task<(APIGatewayProxyResponse Response, string Category)> ExecuteAsync(CustomerCodeInput input, string route, CancellationToken cancellationToken)

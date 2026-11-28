@@ -14,6 +14,7 @@ using GerenciamentoMecanica.Serverless.EmailFunction.Smtp;
 using Npgsql;
 using NSubstitute;
 using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -89,24 +90,24 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
         var outcomes = await Task.WhenAll(handler.HandleAsync(Verification(id, code), HttpContext()), handler.HandleAsync(Verification(id, code), HttpContext()));
         Assert.That(outcomes.Select(result => result.StatusCode).Order(), Is.EqualTo(new[] { 200, 401 }));
         var jwt = new JwtSecurityTokenHandler().ReadJwtToken(JsonSerializer.Deserialize<string>(outcomes.Single(result => result.StatusCode == 200).Body));
-        Assert.That(jwt.Claims.Any(claim => claim.Value == CustomerId.ToString()), Is.True);
-        Assert.That(jwt.Claims.Any(claim => claim.Value == "Customer"), Is.True);
+        Assert.That(jwt.Claims.Single(claim => claim.Type == ClaimTypes.NameIdentifier).Value, Is.EqualTo(CustomerId.ToString()));
+        Assert.That(jwt.Claims.Single(claim => claim.Type == ClaimTypes.Role).Value, Is.EqualTo("Customer"));
         Assert.That(jwt.ValidTo - DateTime.UtcNow, Is.InRange(TimeSpan.FromMinutes(9.5), TimeSpan.FromMinutes(10.1)));
         Assert.That(jwt.Claims.Any(claim => claim.Value == Document || claim.Value == code || claim.Type is "email" or "order_id" or "challengeId"), Is.False);
         Assert.That(initializations, Is.EqualTo(1));
         Assert.That((await ChallengeAsync(id)).State, Is.EqualTo("Consumed"));
-        await senderCapture.Received(1).SendAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await senderCapture.Received(1).SendAsync("Cliente local", "customer@example.invalid", Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
     private ICustomerCodeSender senderCapture = null!;
 
     [TestCase("missing")]
     [TestCase("inactive")]
+    [TestCase("revoked")]
     [TestCase("email")]
     public async Task HttpRequestForIneligibleCustomerWritesNothingAndNeverSends(string reason)
     {
-        if (reason == "missing") await SqlAsync("DELETE FROM customers WHERE id=@CustomerId", new { CustomerId });
-        if (reason == "inactive") await SqlAsync("UPDATE customers SET status='Inactive' WHERE id=@CustomerId", new { CustomerId });
-        if (reason == "email") await SqlAsync("UPDATE customers SET email='invalid-address' WHERE id=@CustomerId", new { CustomerId });
+        if (reason is "missing" or "inactive" or "revoked") await RemoveAccessAsync(reason);
+        if (reason == "email") await SqlAsync("UPDATE customer_access SET email='invalid-address' WHERE customer_id=@CustomerId", new { CustomerId });
         var sender = Substitute.For<ICustomerCodeSender>();
         await using var handler = new FunctionHandler(new FunctionRuntimeProvider(_ => Task.FromResult(HttpRuntime(sender))));
         var response = await handler.HandleAsync(CodeRequest(), HttpContext());
@@ -115,7 +116,7 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
         Assert.That(await ScalarAsync<int>("SELECT count(*) FROM customer_auth_challenges"), Is.Zero);
         Assert.That(await ScalarAsync<int>("SELECT count(*) FROM customer_auth_request_limits"), Is.Zero);
         Assert.That(sender.ReceivedCalls(), Is.Empty);
-        if (reason == "missing") Assert.That(logger.ReceivedCalls().Any(call => call.GetArguments().Any(value => value?.ToString() == "Solicitação de autenticação para cliente não encontrado.")), Is.True);
+        if (reason is "missing" or "revoked") Assert.That(logger.ReceivedCalls().Any(call => call.GetArguments().Any(value => value?.ToString() == "Solicitação de autenticação para cliente não encontrado.")), Is.True);
     }
 
     [Test]
@@ -140,7 +141,7 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
         var id = ChallengeFrom(await handler.HandleAsync(CodeRequest(), HttpContext()));
         Assert.That((await handler.HandleAsync(Verification(id, code, OtherDocument), HttpContext())).StatusCode, Is.EqualTo(401));
         Assert.That((await ChallengeAsync(id)).FailedAttempts, Is.EqualTo(1));
-        await SqlAsync("UPDATE customers SET status='Inactive' WHERE id=@CustomerId", new { CustomerId });
+        await RemoveAccessAsync("inactive");
         Assert.That((await handler.HandleAsync(Verification(id, code), HttpContext())).StatusCode, Is.EqualTo(401));
         Assert.That((await ChallengeAsync(id)).State, Is.EqualTo("Invalidated"));
     }
@@ -161,7 +162,7 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
     {
         await using var blocker = await admin.OpenConnectionAsync();
         await using var transaction = await blocker.BeginTransactionAsync();
-        await Dapper.SqlMapper.ExecuteAsync(blocker, "LOCK TABLE customers IN ACCESS EXCLUSIVE MODE", transaction: transaction);
+        await Dapper.SqlMapper.ExecuteAsync(blocker, "LOCK TABLE customer_access IN ACCESS EXCLUSIVE MODE", transaction: transaction);
         await using var handler = new FunctionHandler(new FunctionRuntimeProvider(_ => Task.FromResult(HttpRuntime(Substitute.For<ICustomerCodeSender>()))));
         var response = await handler.HandleAsync(CodeRequest(), HttpContext(1.2));
         Assert.That(response.StatusCode, Is.EqualTo(500));

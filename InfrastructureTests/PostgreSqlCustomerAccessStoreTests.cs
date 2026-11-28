@@ -40,15 +40,22 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
             CREATE ROLE access_auth LOGIN NOINHERIT PASSWORD 'local-tests-only-auth';
             REVOKE ALL ON SCHEMA public FROM PUBLIC;
             GRANT USAGE ON SCHEMA public TO access_auth;
-            CREATE TABLE customers (id UUID PRIMARY KEY, name VARCHAR(100) NOT NULL, document VARCHAR(100) NOT NULL UNIQUE,
-                status VARCHAR(8) NOT NULL DEFAULT 'Active', email VARCHAR(100) NOT NULL);
+            CREATE TABLE customer_access (
+                customer_id UUID PRIMARY KEY, name VARCHAR(100), document VARCHAR(100) UNIQUE, email VARCHAR(100),
+                status VARCHAR(8) NOT NULL, revision BIGINT NOT NULL CHECK (revision >= 0),
+                CHECK (
+                    (status = 'Revoked' AND name IS NULL AND document IS NULL AND email IS NULL)
+                    OR
+                    (status IN ('Active', 'Inactive') AND name IS NOT NULL AND document IS NOT NULL AND email IS NOT NULL)
+                )
+            );
             CREATE TABLE customer_auth_challenges (id UUID PRIMARY KEY, customer_id UUID NOT NULL, code_salt BYTEA NOT NULL,
                 code_verifier BYTEA NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMPTZ NOT NULL, state VARCHAR(50) NOT NULL DEFAULT 'Pending',
                 failed_attempts INTEGER NOT NULL DEFAULT 0, consumed_at TIMESTAMPTZ, invalidated_at TIMESTAMPTZ);
             CREATE TABLE customer_auth_request_limits (customer_id UUID PRIMARY KEY, window_started_at TIMESTAMPTZ NOT NULL,
                 window_expires_at TIMESTAMPTZ NOT NULL, request_count INTEGER NOT NULL, last_requested_at TIMESTAMPTZ NOT NULL);
-            GRANT SELECT (id, name, document, status, email) ON customers TO access_auth;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON customer_access TO access_auth;
             """);
         settings.Username = "access_auth";
         settings.Password = "local-tests-only-auth";
@@ -62,11 +69,11 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
     public async Task ResetData()
     {
         await SqlAsync("""
-            TRUNCATE customer_auth_challenges, customer_auth_request_limits, customers;
+            TRUNCATE customer_auth_challenges, customer_auth_request_limits, customer_access;
             GRANT SELECT, INSERT, UPDATE, DELETE ON customer_auth_challenges, customer_auth_request_limits TO access_auth;
-            INSERT INTO customers(id,name,document,email) VALUES
-                (@CustomerId,'Cliente local',@Document,'customer@example.invalid'),
-                (@OtherCustomerId,'Outro cliente local',@OtherDocument,'other@example.invalid');
+            INSERT INTO customer_access(customer_id,name,document,email,status,revision) VALUES
+                (@CustomerId,'Cliente local',@Document,'customer@example.invalid','Active',0),
+                (@OtherCustomerId,'Outro cliente local',@OtherDocument,'other@example.invalid','Active',0);
             """, new { CustomerId, Document, OtherCustomerId, OtherDocument });
         generatedCodes = 0;
         logger = Substitute.For<ILogger<PostgreSqlCustomerAccessStore>>();
@@ -96,7 +103,7 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
     [Test]
     public async Task MissingCustomerReturnsBeforeCodeGenerationOrAnyAccessToTheAuthTables()
     {
-        await SqlAsync("DELETE FROM customers WHERE id=@CustomerId", new { CustomerId });
+        await SqlAsync("DELETE FROM customer_access WHERE customer_id=@CustomerId", new { CustomerId });
         await SqlAsync("REVOKE ALL ON customer_auth_challenges, customer_auth_request_limits FROM access_auth");
 
         var result = await store.CreatePendingAsync(Document);
@@ -117,7 +124,7 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
     [TestCase("Active", "invalid email")]
     public async Task IneligibleCustomerDoesNotWriteOrGenerateCode(string status, string email)
     {
-        await SqlAsync("UPDATE customers SET status=@status,email=@email WHERE id=@CustomerId", new { status, email, CustomerId });
+        await SqlAsync("UPDATE customer_access SET status=@status,email=@email WHERE customer_id=@CustomerId", new { status, email, CustomerId });
         await SqlAsync("REVOKE ALL ON customer_auth_challenges, customer_auth_request_limits FROM access_auth");
 
         var result = await store.CreatePendingAsync(Document);
@@ -394,18 +401,78 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
         Assert.That((await ChallengeAsync(pending.ChallengeId)).FailedAttempts, Is.Zero);
     }
 
-    [TestCase(false)]
-    [TestCase(true)]
-    public async Task CustomerRemovedOrInactivatedAfterCaptureCannotAuthenticate(bool delete)
+    [TestCase("missing")]
+    [TestCase("inactive")]
+    [TestCase("revoked")]
+    public async Task CustomerWhoLosesAccessAfterCaptureCannotAuthenticate(string reason)
     {
         var ready = await ReadyAsync();
-        await SqlAsync(delete ? "DELETE FROM customers WHERE id=@CustomerId" : "UPDATE customers SET status='Inactive' WHERE id=@CustomerId", new { CustomerId });
+        await RemoveAccessAsync(reason);
 
         var result = await store.VerifyAndConsumeAsync(ready.ChallengeId,Document,Code,tokens);
 
         Assert.That(result.Token, Is.Null);
         Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Invalidated"));
+        tokens.DidNotReceive().Generate(Arg.Any<CustomerIdentity>());
     }
+
+    [Test]
+    public async Task SyncReplaysOnlyIdenticalRevisionsAndEmailChangeInvalidatesOpenCode()
+    {
+        var ready = await ReadyAsync();
+        var changed = Synchronization(2, "new-contact@example.invalid");
+        Assert.That(await store.SynchronizeAsync(changed, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(changed, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(Synchronization(2, "different@example.invalid"), CancellationToken.None),
+            Is.EqualTo(CustomerAccessWriteOutcome.Rejected));
+        Assert.That(await store.SynchronizeAsync(Synchronization(1, "older@example.invalid"), CancellationToken.None),
+            Is.EqualTo(CustomerAccessWriteOutcome.Stale));
+        Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Invalidated"));
+        Assert.That((await store.VerifyAndConsumeAsync(ready.ChallengeId, Document, Code, tokens)).Token, Is.Null);
+    }
+
+    [Test]
+    public async Task RevocationRetainsTheRevisionAndRejectsOlderUpserts()
+    {
+        var ready = await ReadyAsync();
+        var revoke = Synchronization(2, null);
+        Assert.That(await store.SynchronizeAsync(revoke, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(revoke, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.Applied));
+        Assert.That(await store.SynchronizeAsync(Synchronization(1, "older@example.invalid"), CancellationToken.None),
+            Is.EqualTo(CustomerAccessWriteOutcome.Stale));
+        Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Invalidated"));
+        Assert.That((await store.CreatePendingAsync(Document)).Outcome, Is.EqualTo(CustomerCodeRequestOutcome.CustomerNotFound));
+        Assert.That(await ScalarAsync<int>("SELECT count(*) FROM customer_access WHERE status='Revoked' AND revision=2 AND document IS NULL"),
+            Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task DuplicateDocumentIsAConflictWithoutChangingTheAccessOrChallenge()
+    {
+        var ready = await ReadyAsync();
+        var duplicate = Synchronization(1, "new-contact@example.invalid", OtherDocument);
+        Assert.That(await store.SynchronizeAsync(duplicate, CancellationToken.None), Is.EqualTo(CustomerAccessWriteOutcome.DocumentConflict));
+        Assert.That((await ChallengeAsync(ready.ChallengeId)).State, Is.EqualTo("Ready"));
+        Assert.That((await store.VerifyAndConsumeAsync(ready.ChallengeId, Document, Code, tokens)).Token, Is.Not.Null);
+    }
+
+    private static CustomerAccessSyncCommand Synchronization(long revision, string? email, string document = Document) => new()
+    {
+        Operation = CustomerAccessSyncCommand.SyncOperation, Version = 1, CustomerId = CustomerId, Revision = revision,
+        Action = email is null ? "revoke" : "upsert",
+        Access = email is null ? null : new() { Name = "Cliente local", Document = document, Email = email, Status = "Active" }
+    };
+
+    private Task RemoveAccessAsync(string reason) => SqlAsync(reason switch
+    {
+        "missing" => "DELETE FROM customer_access WHERE customer_id=@CustomerId",
+        "inactive" => "UPDATE customer_access SET status='Inactive' WHERE customer_id=@CustomerId",
+        "revoked" => """
+            UPDATE customer_access SET status='Revoked', name=NULL, document=NULL, email=NULL, revision=revision+1
+            WHERE customer_id=@CustomerId
+            """,
+        _ => throw new ArgumentOutOfRangeException(nameof(reason))
+    }, new { CustomerId });
 
     [Test]
     public async Task CorruptStoredStateIsRejectedByCsharpWithoutChangingAttempts()
@@ -514,9 +581,8 @@ public sealed partial class PostgreSqlCustomerAccessStoreTests
     public async Task ARequestThatIsNotAdmittedDoesNotRunCleanup(string reason)
     {
         if (reason == "rate-limited") await store.CreatePendingAsync(Document);
-        if (reason == "missing") await SqlAsync("DELETE FROM customers WHERE id=@CustomerId", new { CustomerId });
-        if (reason == "inactive") await SqlAsync("UPDATE customers SET status='Inactive' WHERE id=@CustomerId", new { CustomerId });
-        if (reason == "invalid-email") await SqlAsync("UPDATE customers SET email='' WHERE id=@CustomerId", new { CustomerId });
+        if (reason is "missing" or "inactive") await RemoveAccessAsync(reason);
+        if (reason == "invalid-email") await SqlAsync("UPDATE customer_access SET email='' WHERE customer_id=@CustomerId", new { CustomerId });
         await SeedExpiredRowsAsync(1);
 
         var result = await store.CreatePendingAsync(Document);

@@ -1,19 +1,26 @@
 name: serverless-deploy
-run-name: serverless-deploy / ${{ github.ref_name == 'develop' && 'hom' || 'prd' }} / ${{ github.sha }}
+run-name: serverless-deploy / ${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }} / ${{ github.sha }}
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Develop/hom ou main/prd
+        required: true
+        default: hom
+        type: choice
+        options: [hom, prd]
 
 permissions: {}
 concurrency:
-  group: serverless-deploy-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+  group: serverless-deploy-${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
   cancel-in-progress: false
 
 jobs:
   publish-email:
     uses: ./.github/workflows/reusable-publish.yml
     concurrency:
-      group: email-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      group: email-${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -21,13 +28,13 @@ jobs:
       id-token: write
     with:
       component: email
-      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      environment: ${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
 
   provision-email:
     needs: publish-email
     uses: ./.github/workflows/reusable-provision.yml
     concurrency:
-      group: email-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      group: email-${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -35,13 +42,13 @@ jobs:
       id-token: write
     with:
       component: email
-      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      environment: ${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
       artifact_commit: ${{ github.sha }}
 
   publish-auth:
     uses: ./.github/workflows/reusable-publish.yml
     concurrency:
-      group: auth-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      group: auth-${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -49,13 +56,13 @@ jobs:
       id-token: write
     with:
       component: auth
-      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      environment: ${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
 
   provision-auth:
     needs: [publish-auth, provision-email]
     uses: ./.github/workflows/reusable-provision.yml
     concurrency:
-      group: auth-${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      group: auth-${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -63,5 +70,5 @@ jobs:
       id-token: write
     with:
       component: auth
-      environment: ${{ github.ref_name == 'develop' && 'hom' || 'prd' }}
+      environment: ${{ inputs.environment || (github.ref_name == 'develop' && 'hom' || 'prd') }}
       artifact_commit: ${{ github.sha }}

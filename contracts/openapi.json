@@ -1,11 +1,511 @@
 {
   "openapi": "3.0.3",
   "info": {
-    "title": "Autenticação de clientes",
-    "version": "2.0.0",
-    "description": "Código de uso único capturado no SMTP4dev; substitui customers/validate na publicação coordenada."
+    "title": "Autenticação e contas da oficina",
+    "version": "2.1.0",
+    "description": "Autenticação de clientes por código de uso único, login de usuários internos e gestão de contas."
   },
   "paths": {
+    "/Authentication": {
+      "post": {
+        "operationId": "authenticateInternalUser",
+        "summary": "Autenticar usuário interno",
+        "description": "Login de Admin ou Mechanic por nome, perfil e senha. Envie o cabeçalho Accept com application/json para receber uma string JSON. O padrão é texto puro.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCredentials"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCredentials"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JWT HS256 válido por dez minutos.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo ou campos inválidos.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Usuário ou senha inválidos.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Tipo ou codificação do corpo incompatível.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalFailure"
+          }
+        }
+      }
+    },
+    "/Users": {
+      "post": {
+        "operationId": "registerInternalUser",
+        "summary": "Cadastrar usuário interno",
+        "description": "Operação exclusiva de Admin.",
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCredentials"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalCredentials"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Usuário cadastrado.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo, campos ou senha inválidos.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/BearerChallenge"
+          },
+          "403": {
+            "description": "Perfil sem permissão.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "409": {
+            "description": "Já existe um usuário com esse nome e perfil.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Tipo ou codificação do corpo incompatível.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalFailure"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getInternalUser",
+        "summary": "Consultar usuário interno",
+        "description": "Admin pode consultar contas. Mechanic pode consultar somente a própria conta.",
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "query",
+            "description": "Nome para filtrar a consulta.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Perfil para filtrar a consulta.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identificação, nome e perfil da conta.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalUser"
+                }
+              },
+              "text/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalUser"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Filtros inválidos.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/BearerChallenge"
+          },
+          "403": {
+            "description": "Perfil sem permissão ou consulta fora da própria conta. A resposta por perfil pode vir sem corpo.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Usuário não encontrado.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalFailure"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateOwnInternalUser",
+        "summary": "Atualizar a própria conta",
+        "description": "Admin e Mechanic podem alterar nome ou senha da conta identificada pelo JWT. Campos omitidos preservam os valores atuais.",
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOwnInternalUser"
+              }
+            },
+            "text/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOwnInternalUser"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Conta atualizada.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "400": {
+            "description": "Corpo, campos ou senha inválidos.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/BearerChallenge"
+          },
+          "403": {
+            "description": "Perfil sem permissão.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "404": {
+            "description": "Conta não encontrada.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nome já utilizado por outro usuário com o mesmo perfil.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Tipo ou codificação do corpo incompatível.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalFailure"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteInternalUser",
+        "summary": "Excluir usuário interno",
+        "description": "Operação exclusiva de Admin.",
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "description": "UUID do usuário a excluir diferente do UUID vazio.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Conta excluída.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "400": {
+            "description": "Identificação do usuário inválida.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalProblemDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/BearerChallenge"
+          },
+          "403": {
+            "description": "Perfil sem permissão.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            }
+          },
+          "404": {
+            "description": "Usuário não encontrado.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOperationError"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalFailure"
+          }
+        }
+      }
+    },
     "/customers/auth/request-code": {
       "post": {
         "operationId": "requestCustomerAccessCode",
@@ -270,7 +770,181 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "Bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "headers": {
+      "NoStore": {
+        "schema": {
+          "type": "string",
+          "enum": [
+            "no-store"
+          ]
+        }
+      }
+    },
+    "responses": {
+      "BearerChallenge": {
+        "description": "JWT ausente ou inválido para a operação.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          },
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "Bearer"
+              ]
+            }
+          }
+        }
+      },
+      "InternalFailure": {
+        "description": "Falha técnica no processamento.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/InternalOperationError"
+            }
+          }
+        }
+      }
+    },
     "schemas": {
+      "InternalCredentials": {
+        "type": "object",
+        "required": [
+          "name",
+          "password",
+          "role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "description": "Nome do usuário."
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 1,
+            "writeOnly": true
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "Admin",
+              "Mechanic"
+            ]
+          }
+        }
+      },
+      "UpdateOwnInternalUser": {
+        "type": "object",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 100
+          },
+          "password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 1,
+            "writeOnly": true
+          }
+        }
+      },
+      "InternalUser": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "Admin",
+              "Mechanic"
+            ]
+          }
+        }
+      },
+      "InternalProblemDetails": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "InternalOperationError": {
+        "type": "object",
+        "required": [
+          "title",
+          "status",
+          "detail",
+          "instance"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "additionalProperties": false,

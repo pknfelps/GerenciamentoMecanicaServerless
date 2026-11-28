@@ -9,9 +9,9 @@ namespace GerenciamentoMecanica.Autenticacao.Infrastructure.Persistence;
 public sealed class PostgreSqlCustomerLookup(NpgsqlDataSource database, IntegrationMetrics? metrics = null) : ICustomerLookup
 {
     private const string Query = """
-                                 SELECT id, name, document, status
-                                 FROM public.customers
-                                 WHERE document = @Document;
+                                 SELECT customer_id AS Id, name, document, status
+                                 FROM public.customer_access
+                                 WHERE document = @Document AND status <> 'Revoked';
                                  """;
 
     public async Task<CustomerIdentity?> FindByDocumentAsync(

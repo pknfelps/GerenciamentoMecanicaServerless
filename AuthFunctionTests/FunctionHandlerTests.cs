@@ -82,7 +82,8 @@ public class FunctionHandlerTests
         Assert.That(requests, Is.Zero);
         using var json = JsonDocument.Parse(Log());
         Assert.That(json.RootElement.GetProperty("category").GetString(), Is.EqualTo("authenticated"));
-        Assert.That(json.RootElement.EnumerateObject().Count(), Is.EqualTo(5));
+        Assert.That(json.RootElement.GetProperty("http.route").GetString(), Is.EqualTo(AuthenticationRoute.VerifyCode));
+        Assert.That(json.RootElement.GetProperty("http.request.method").GetString(), Is.EqualTo("POST"));
         Assert.That(Log(), Does.Not.Contain("test.jwt").And.Not.Contain("01234567").And.Not.Contain(Document));
     }
     [TestCase("/customers/validate")]
@@ -283,5 +284,33 @@ public class FunctionHandlerTests
         using var json = JsonDocument.Parse(output.ToArray());
         Assert.That(json.RootElement.GetProperty("statusCode").GetInt32(), Is.EqualTo(200));
         Assert.That(JsonSerializer.Deserialize<string>(json.RootElement.GetProperty("body").GetString()!), Is.EqualTo("test.jwt.token"));
+    }
+
+    [Test]
+    public async Task DirectInvocationAndGatewayKeepDistinctContracts()
+    {
+        using var handler = Handler();
+        var id = Guid.NewGuid();
+        var command = JsonSerializer.SerializeToElement(new
+        {
+            operation = "sync-customer-access", version = 1, customerId = id, revision = 3, action = "revoke",
+            access = (object?)null
+        });
+        var serializer = new DefaultLambdaJsonSerializer();
+        using var directBytes = new MemoryStream();
+        serializer.Serialize(await handler.HandleInvocationAsync(command, context), directBytes);
+        using var direct = JsonDocument.Parse(directBytes.ToArray());
+        Assert.That(direct.RootElement.GetProperty("customerId").GetGuid(), Is.EqualTo(id));
+        Assert.That(direct.RootElement.GetProperty("revision").GetInt64(), Is.EqualTo(3));
+        Assert.That(direct.RootElement.GetProperty("outcome").GetString(), Is.EqualTo("pending"));
+
+        using var gatewayBytes = new MemoryStream();
+        serializer.Serialize(Request(body: command.GetRawText()), gatewayBytes);
+        using var gateway = JsonDocument.Parse(gatewayBytes.ToArray());
+        using var reply = new MemoryStream();
+        serializer.Serialize(await handler.HandleInvocationAsync(gateway.RootElement, context), reply);
+        using var json = JsonDocument.Parse(reply.ToArray());
+        Assert.That(json.RootElement.GetProperty("statusCode").GetInt32(), Is.EqualTo(400));
+        Assert.That(requests, Is.Zero);
     }
 }

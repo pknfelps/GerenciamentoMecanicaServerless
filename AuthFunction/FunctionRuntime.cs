@@ -1,4 +1,5 @@
 using Amazon.Lambda;
+using GerenciamentoMecanica.Auth.Contracts;
 using GerenciamentoMecanica.Autenticacao.Infrastructure.Observability;
 using GerenciamentoMecanica.Autenticacao.Application.Authentication;
 using GerenciamentoMecanica.Autenticacao.Infrastructure.Authentication;
@@ -18,6 +19,10 @@ public sealed class FunctionRuntime : IDisposable, IAsyncDisposable
     public NpgsqlDataSource Database { get; }
     public RequestCustomerCodeUseCase RequestCode { get; }
     public VerifyCustomerCodeUseCase VerifyCode { get; }
+    public InternalLoginUseCase InternalLogin { get; }
+    public InternalUsersUseCase InternalUsers { get; }
+    public InternalUserTokenValidator InternalUserTokens { get; }
+    public PostgreSqlCustomerAccessStore CustomerAccess { get; }
 
     public FunctionRuntime(RuntimeConfiguration configuration, IntegrationMetrics? metrics = null,
         ICustomerCodeSender? sender = null, ILogger<PostgreSqlCustomerAccessStore>? logger = null)
@@ -36,10 +41,17 @@ public sealed class FunctionRuntime : IDisposable, IAsyncDisposable
             }
             var diagnostics = new FunctionDiagnosticLogger<PostgreSqlCustomerAccessStore>(logger);
             var store = new PostgreSqlCustomerAccessStore(Database, diagnostics, metrics);
+            CustomerAccess = store;
             var normalizer = new CustomerDocumentNormalizer();
             RequestCode = new RequestCustomerCodeUseCase(normalizer, store, sender,
                 type => diagnostics.LogWarning("Não foi possível invalidar o desafio de autenticação. Tipo: {ExceptionType}", type));
             VerifyCode = new VerifyCustomerCodeUseCase(normalizer, store, new CustomerTokenIssuer(Jwt));
+            var jwtIssuer = new JwtIssuer(Jwt.Key, Jwt.Issuer, Jwt.Audience);
+            var internalUsers = new PostgreSqlInternalUserStore(Database, metrics);
+            var passwords = new Pbkdf2PasswordHasher();
+            InternalLogin = new InternalLoginUseCase(internalUsers, passwords, (name, role, id) => jwtIssuer.Generate(name, role, id));
+            InternalUsers = new InternalUsersUseCase(internalUsers, passwords);
+            InternalUserTokens = new InternalUserTokenValidator(Jwt);
         }
         catch { emailClient?.Dispose(); Database.Dispose(); throw; }
     }

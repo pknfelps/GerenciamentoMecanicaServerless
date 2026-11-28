@@ -1,6 +1,6 @@
 # Funções serverless da oficina
 
-AuthFunction .NET 10 autentica por documento e código de uso único, com desafio PostgreSQL e envio por Invoke à EmailFunction. EmailFunction concentra SMTP/MIME e captura no SMTP4dev, sem relay externo. Login com senha de usuários internos permanece na [API](https://github.com/pknfelps/GerenciamentoMecanicaSistema/tree/develop).
+AuthFunction .NET 10 autentica Admin e Mechanic por senha, administra suas contas e autentica clientes por documento e código de uso único. A função mantém os dados de identidade em mecanica_identity. A API da oficina sincroniza o cadastro de acesso do cliente por Invoke privado. EmailFunction concentra SMTP/MIME e captura no SMTP4dev, sem relay externo.
 
 ## Estrutura e arquitetura
 
@@ -8,15 +8,16 @@ AuthFunction .NET 10 autentica por documento e código de uso único, com desafi
 flowchart LR
     GW["Gateway"] -->|versao numerica| AUTH
     API["API da oficina"] -->|IAM / alias live| EMAIL
+    API -->|"Sincronizar acesso por IAM - alias live"| AUTH
     subgraph FUNCTIONS["Repositorio Serverless: duas stacks SAM"]
-        AUTH["AuthFunction: request-code / verify-code"]
+        AUTH["AuthFunction: login, contas internas e códigos"]
         EMAIL["EmailFunction: MIME e SMTP"]
         EXT["Extensao Collector"]
         AUTH -->|IAM / alias live| EMAIL
         AUTH -->|OTLP em loopback| EXT
     end
     CONFIG["SSM e Secrets Manager"] -.->|inicializacao| AUTH
-    AUTH -->|cadastro, desafios e limites / TLS| DB[("RDS PostgreSQL")]
+    AUTH -->|identidade e autenticação / TLS| DB[("mecanica_identity no RDS")]
     EMAIL -->|NLB interno / TCP 2525| SMTP["SMTP4dev privado no EKS"]
     EXT -->|OTLP HTTPS| NR["New Relic"]
     EMAIL -->|JSON tecnico| LOG["CloudWatch Logs"]
@@ -49,7 +50,7 @@ Cliente ausente/Inactive/sem e-mail utilizável recebe 202 sem escrita/limpeza/e
 
 JWT HS256 mantém UUID/nome cadastrado, role Customer e dez minutos, sem documento, e-mail, código, challengeId ou OS. Assinatura/consumo só retornam token após commit; sem refresh/replay/garantia de entrega única. A API aplica titularidade, cadastro Active e regras da OS, com ClockSkew zero e decisão explícita.
 
-A rota antiga/desconhecida retorna 404 no handler; método incorreto retorna 405/Allow: POST. O Gateway usa OpenAPI auth 2.0.0 e as duas rotas, sem Authorizer ou endpoint público de envio. Em nova implantação, preservar essa coordenação e a versão numérica auth consumida pelo Gateway.
+O OpenAPI auth 2.1.0 descreve POST /Authentication, GET/POST/PATCH/DELETE /Users e as duas operações de código de cliente. /Authentication recebe name, password e role para Admin ou Mechanic. Com Accept application/json retorna o JWT como string JSON. A resposta padrão de sucesso mantém texto simples. As operações de /Users exigem Bearer e aplicam o perfil e a titularidade da conta. O Gateway encaminha as sete operações à versão numérica publicada. [Permissões e respostas HTTP](https://github.com/pknfelps/GerenciamentoMecanicaSistema/blob/develop/docs/arquitetura/ACESSO_E_AUTENTICACAO.md).
 
 ## Consumo do Auth.Contracts
 
@@ -80,17 +81,17 @@ sam validate --lint --template-file templates/auth.yaml --region us-east-1
 sam build --template-file templates/auth.yaml
 ```
 
-Publish local não implanta recursos. Conferir DLL/deps/runtimeconfig, Certificates/rds-ca.pem e Observability/observability.json/collector.yaml. Testes do handler são a execução integrada local, sem criar servidor/executável próprio. [Casos de uso da autenticação](Application/Authentication). Testes automatizados de transporte/Collector/telemetria da Lambda foram removidos por decisão; testes funcionais e MeterListener de integrações permanecem.
+Publish local gera os artefatos para conferência de DLL/deps/runtimeconfig, Certificates/rds-ca.pem e Observability/observability.json/collector.yaml. Os testes do handler exercitam login interno, gestão de contas, autenticação por código e sincronização privada com bootstrap injetado. Os testes de observabilidade cobrem configuração, propagação e telemetria das invocações. [Casos de uso da autenticação](Application/Authentication).
 
 ## Inicialização e persistência
 
 Runtime__Environment=hom|prd e AWS_REGION=us-east-1 são obrigatórios ao inicializar autenticação real. Ausente/vazio/inválido falha, sem appsettings de banco/JWT ou alternativa local. O SDK usa a cadeia padrão de credenciais. Construir o handler/bootstrap não lê a configuração de autenticação; a primeira chamada de corpo válido pede o runtime. Observabilidade pode ser criada antes dessa leitura.
 
-SSM String/WithDecryption=false fornece nove campos de banco/JWT e um segundo lote com alias/contrato email/v1. Banco/JWT: jwt-secret-arn/issuer/audience em base/v2 e endpoint/port/database-name/auth-secret-arn/auth-db-user/ssl-mode em database/v2. AWSCURRENT fornece JWT e credencial mecanica_auth; não usa Secret administrativo/database-api. Os valores ficam em memória e a inicialização bem-sucedida é reutilizada por handler. Falha não é armazenada como sucesso e permite nova tentativa; mudanças de Secret exigem nova inicialização.
+SSM String/WithDecryption=false fornece nove campos de banco/JWT e um segundo lote com alias/contrato email/v1. Banco/JWT: jwt-secret-arn/issuer/audience em base/v2 e endpoint/port/auth-database-name/auth-secret-arn/auth-db-user/ssl-mode em database/v2. AWSCURRENT fornece JWT e credencial mecanica_auth; não usa Secret administrativo/database-api. Os valores ficam em memória e a inicialização bem-sucedida é reutilizada por handler. Falha não é armazenada como sucesso e permite nova tentativa; mudanças de Secret exigem nova inicialização.
 
 Leitura AWS tem prazo de oito segundos e retries Standard existentes. Handler reserva um segundo do RemainingTime para resposta. Conexão/comando têm cinco segundos cada, sujeitos ao prazo total. NpgsqlDataSource é fábrica reutilizável, Pooling=false/TLS VerifyFull/GssEncryptionMode=Disable; cada chamada ao store/lookup abre e descarta sua conexão, compartilhada pelos comandos da operação, inclusive em erro/cancelamento. CA pública está em [Infrastructure/Certificates/rds-ca.pem](Infrastructure/Certificates/rds-ca.pem).
 
-SQL fixo parametrizado consulta id/name/document/status/email de customers e opera somente os desafios/limites do cliente elegível; não consulta orders. Consulta sem resultado/Inactive não é falha de banco. Dados corrompidos/status desconhecido/duplicatas são técnicos. Handler implementa descarte explícito para testes/local; a AWS não garante callback de descarte ao encerrar o ambiente de execução.
+A função lê e grava users, customer_access, customer_auth_challenges e customer_auth_request_limits em mecanica_identity. customer_access recebe UUID, nome, documento, e-mail, situação e revisão por Invoke privado no alias live. A AuthFunction revoga o acesso removendo os dados cadastrais do registro e preservando UUID, estado e revisão. A API mantém o cadastro operacional em seu próprio database.
 
 ## Observabilidade
 
@@ -106,13 +107,13 @@ Mecanica.Auth mede solicitações de código e confirmações/duração por resu
 
 | Auth | Email | Fluxo compartilhado |
 |---|---|---|
-| [serverless-deploy](.github/workflows/serverless-deploy.yml) | Email e auth | Push/merge develop/hom ou main/prd: publica os dois componentes; implanta email antes de auth, usando o mesmo SHA |
+| [serverless-deploy](.github/workflows/serverless-deploy.yml) | Email e auth | Disparo manual ou push/merge develop/hom ou main/prd. Publica os dois componentes e implanta email antes de auth, usando o mesmo SHA |
 | [auth-ci](.github/workflows/auth-ci.yml) | [email-ci](.github/workflows/email-ci.yml) | PR/manual: solução completa, ambos SAMs, actionlint |
 | [auth-publish](.github/workflows/auth-publish.yml) | [email-publish](.github/workflows/email-publish.yml) | Manual: testes/build SAM → ZIP/template/checksum imutável; OpenAPI somente auth |
 | [auth-provision](.github/workflows/auth-provision.yml) | [email-provision](.github/workflows/email-provision.yml) | Manual: environment/artifact_commit, rede/dependências/VersionId → deploy SAM |
 | [auth-destroy](.github/workflows/auth-destroy.yml) | [email-destroy](.github/workflows/email-destroy.yml) | Manual: consumidores ausentes → sam delete → ENIs/egress ausentes |
 
-No fluxo automático, as publicações reutilizam os mesmos testes, builds e artefatos imutáveis dos fluxos manuais; provision-auth aguarda publish-auth e provision-email. Base/SMTP4dev e banco/Job devem estar disponíveis antes do push. A API deve ser publicada após a conclusão de email. Atualizar Gateway depois de concluir API/auth. Não há disparo de outros repositórios nem aprovação intermediária de SAM.
+Em um ambiente vazio, concluir base/SMTP4dev e database-provision antes de executar serverless-deploy. A pipeline confere os esquemas e a confirmação do Job no SSM. provision-auth aguarda publish-auth e provision-email. Antes de implantar a API, confirmar EmailFunction e AuthFunction publicadas. O parâmetro auth/v2/api-sync-version informa a versão do contrato privado e deve corresponder à versão numérica do alias live. Em seguida, implantar a API e publicar o Gateway com os contratos dessas revisões.
 
 Wrappers fixam componente; quatro reusable-*.yml concentram etapas comuns com allowlists. Develop/hom e main/prd, OIDC e filas por componente/ambiente; sem aprovação adicional. Required checks configuration/dotnet preservados como gates finais do auth-ci, abrangendo também EmailFunction e seu SAM. Role CI somente leitura do pacote; Environment AWS_ROLE_ARN para auth e **AWS_EMAIL_ROLE_ARN** para email. Ver [Workflows Serverless](.github/workflows).
 

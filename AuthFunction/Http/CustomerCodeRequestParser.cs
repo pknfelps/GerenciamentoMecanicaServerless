@@ -67,9 +67,7 @@ public static class CustomerCodeRequestParser
 
     private static bool HasJsonContentType(APIGatewayProxyRequest request)
     {
-        var single = request.Headers?.Where(header => header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase)).Select(header => header.Value) ?? [];
-        var multiple = request.MultiValueHeaders?.Where(header => header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase)).SelectMany(header => header.Value ?? [string.Empty]) ?? [];
-        var values = single.Concat(multiple).ToArray();
+        var values = ProxyRequestHeaders.Values(request, "Content-Type").ToArray();
         return values.Length > 0 && values.All(IsJsonContentType);
     }
 
