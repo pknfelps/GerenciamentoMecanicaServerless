@@ -192,7 +192,7 @@ jobs:
             echo '::error::Conclua database-provision com os dois schemas inicializados antes de auth-provision.'
             exit 1
           fi
-          printf '\nDatabase revision: `%s`.\n' "$(jq -r .commit <<< "$ready")" >> "$GITHUB_STEP_SUMMARY"
+          printf "\nDatabase revision: \`%s\`.\n" "$(jq -r .commit <<< "$ready")" >> "$GITHUB_STEP_SUMMARY"
       - name: Check New Relic credential metadata
         if: ${{ inputs.component == 'auth' }}
         run: |
